@@ -49,10 +49,9 @@ When a business talks to potential clients (called **Leads**), it's easy to lose
 ### 5. 🛡️ Smart Duplicate Detection
 - While you type an email or phone number in the "New Lead" form, the system checks in real time and warns you if a duplicate contact already exists.
 
-### 6. 📄 PDF Lead Extraction
-- Upload a lead sheet or document in PDF format to automatically extract contact information and add it to your pipeline.
 
-### 7. 🔒 Secure Authentication
+
+### 6. 🔒 Secure Authentication
 - JWT (JSON Web Token) based login with encrypted passwords (bcrypt).
 - Quick 1-click demo accounts for easy testing.
 
@@ -190,9 +189,9 @@ On the login page, you can sign in instantly using any of these pre-seeded accou
 
 | Name | Role | Email | Password |
 |---|---|---|---|
-| **Shivam Sharma** | Sales Manager | `shivam@aflix.com` | `password123` |
-| **Alex Chen** | Sales Representative | `alex@aflix.com` | `password123` |
-| **Priya Patel** | Account Executive | `priya@aflix.com` | `password123` |
+| **aflix** | Sales Manager | `aflix@aflix.com` | `password123` |
+| **aflix** | Sales Representative | `alex@aflix.com` | `password123` |
+| **aflix** | Account Executive | `priya@aflix.com` | `password123` |
 
 *(You can also click **Register** to create a brand new account).*
 
