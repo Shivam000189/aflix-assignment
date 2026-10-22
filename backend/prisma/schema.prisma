@@ -1,0 +1,130 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String   @default("")
+  email     String   @unique
+  password  String
+  role      String   @default("sales_rep")
+  phone     String   @default("")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relational Foreign Key References
+  assignedLeads     Lead[]        @relation("LeadAssignedTo")
+  createdLeads      Lead[]        @relation("LeadCreatedBy")
+  assignedFollowUps FollowUp[]    @relation("FollowUpAssignedTo")
+  createdFollowUps  FollowUp[]    @relation("FollowUpCreatedBy")
+  activityLogs      ActivityLog[] @relation("ActivityLogPerformedBy")
+
+  @@index([email])
+  @@index([isActive])
+  @@map("users")
+}
+
+model Lead {
+  id                String    @id @default(uuid())
+  name              String
+  company           String    @default("")
+  email             String    @default("")
+  phone             String    @default("")
+  normalizedPhone   String    @default("")
+  source            String    @default("Website")
+  serviceInterested String    @default("Web Development")
+  budget            String    @default("₹1,00,000 - ₹5,00,000")
+  status            String    @default("New")
+  priority          String    @default("Medium")
+  owner             String    @default("Unassigned")
+  notes             String    @default("")
+  isArchived        Boolean   @default(false)
+  archivedAt        DateTime?
+  isDuplicate       Boolean   @default(false)
+  duplicateReasons  String[]  @default([])
+  duplicateMatches  String[]  @default([])
+
+  // Relational Foreign Keys
+  assignedToId      String?
+  assignedTo        User?     @relation("LeadAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  createdById       String?
+  createdBy         User?     @relation("LeadCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Related Child Records (Cascaded)
+  followUps         FollowUp[]
+  activityLogs      ActivityLog[]
+
+  @@index([email])
+  @@index([normalizedPhone])
+  @@index([status])
+  @@index([priority])
+  @@index([source])
+  @@index([isArchived])
+  @@index([createdAt])
+  @@index([assignedToId])
+  @@map("leads")
+}
+
+model FollowUp {
+  id             String    @id @default(uuid())
+  leadId         String
+  lead           Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  title          String
+  type           String    @default("Follow Up")
+  dueDate        DateTime
+  notes          String    @default("")
+  priority       String    @default("Medium")
+  isCompleted    Boolean   @default(false)
+  completedAt    DateTime?
+
+  assignedToId   String?
+  assignedTo     User?     @relation("FollowUpAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+  assignedToName String    @default("Unassigned")
+
+  createdById    String?
+  createdBy      User?     @relation("FollowUpCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([leadId])
+  @@index([dueDate])
+  @@index([isCompleted])
+  @@index([assignedToId])
+  @@index([leadId, dueDate])
+  @@map("follow_ups")
+}
+
+model ActivityLog {
+  id              String   @id @default(uuid())
+  leadId          String
+  lead            Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  type            String
+  description     String
+  fieldName       String?
+  oldValue        String?
+  newValue        String?
+
+  performedById   String?
+  performedBy     User?    @relation("ActivityLogPerformedBy", fields: [performedById], references: [id], onDelete: SetNull)
+  performedByName String   @default("System")
+
+  timestamp       DateTime @default(now())
+
+  @@index([leadId])
+  @@index([timestamp])
+  @@index([leadId, timestamp])
+  @@index([performedById])
+  @@map("activity_logs")
+}
