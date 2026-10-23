@@ -310,19 +310,854 @@ The import engine automatically resolves header synonyms to standard CRM Lead fi
 4. **Audit Trail**:
    - Creates canonical `ActivityLog` records with `type: 'imported'` and detailed metadata for every ingested lead.
 
-### API Endpoints
+---
 
-#### 1. Preview Import File
-- **Endpoint**: `POST /api/leads/import/preview`
-- **Auth**: Bearer JWT (`admin`, `manager`, `user`)
-- **Content-Type**: `multipart/form-data` (Field: `file`)
-- **Query Params**: `type=csv|pdf` (optional)
+## 📡 Complete REST API Reference & Endpoints Guide
 
-#### 2. Confirm Batch Import
-- **Endpoint**: `POST /api/leads/import`
-- **Auth**: Bearer JWT (`admin`, `manager`, `user`)
+The Aflix CRM backend exposes a RESTful JSON API running on port `5000` (base URL: `http://localhost:5000/api`).
+
+All endpoints (except `/api/health`, `/api/auth/register`, and `/api/auth/login`) require a valid JSON Web Token passed in the `Authorization` header:
+```http
+Authorization: Bearer <your_jwt_token>
+```
+
+### 📋 API Endpoints Summary Matrix
+
+| Method | Endpoint | Auth Required | Allowed Roles | Description |
+|:---:|---|:---:|:---:|---|
+| `GET` | `/api/health` | No (Public) | All | System health check & database connection probe |
+| `POST` | `/api/auth/register` | No (Public) | All | Register a new user (defaults to `user` role) |
+| `POST` | `/api/auth/login` | No (Public) | All | Sign in with email & password, returns JWT token |
+| `GET` | `/api/auth/me` | Yes | All | Get current authenticated user's profile |
+| `GET` | `/api/auth/users` | Yes | `admin`, `manager` | List all active users across the organization |
+| `GET` | `/api/leads` | Yes | All | Paginated list of leads with filtering, search & sorting |
+| `POST` | `/api/leads` | Yes | All | Create a new lead with duplicate checking & tasks |
+| `GET` | `/api/leads/check-duplicate` | Yes | All | Check email/phone duplicates before submitting |
+| `GET` | `/api/leads/stats` | Yes | All | Aggregated CRM KPIs, win rate, stage & priority counts |
+| `GET` | `/api/leads/pipeline` | Yes | All | Visual Kanban pipeline data with stage values & funnel |
+| `PATCH` | `/api/leads/:id/stage` | Yes | All | Advance or move a lead between pipeline stages |
+| `GET` | `/api/leads/follow-ups/overview` | Yes | All | Central task hub: overdue, today, and upcoming tasks |
+| `GET` | `/api/leads/:id` | Yes | All | Get single lead by ID with full tasks and activity history |
+| `PUT` | `/api/leads/:id` | Yes | All | Update lead details with automated field-change audit logs |
+| `DELETE` | `/api/leads/:id` | Yes | `admin`, `manager` | Cascade delete a lead and all child tasks/audit logs |
+| `POST` | `/api/leads/:id/tasks` | Yes | All | Schedule a follow-up task (`Call`, `Meeting`, `Email`, etc.) |
+| `PATCH` | `/api/leads/:id/tasks/:taskId` | Yes | All | Toggle task completion or edit task details |
+| `PATCH` | `/api/leads/tasks/:taskId` | Yes | All | Direct task update / completion toggle by task ID |
+| `DELETE` | `/api/leads/:id/tasks/:taskId` | Yes | All | Delete a follow-up task from a lead |
+| `GET` | `/api/leads/:id/follow-ups` | Yes | All | List all follow-up tasks for a specific lead |
+| `POST` | `/api/leads/:id/activities` | Yes | All | Append a manual note or activity to lead timeline |
+| `GET` | `/api/leads/:id/activity-logs` | Yes | All | Fetch full chronological audit history for a lead |
+| `PATCH` | `/api/leads/:id/archive` | Yes | All | Soft-archive a lead (hides from active views) |
+| `PATCH` | `/api/leads/:id/unarchive` | Yes | All | Restore an archived lead to active pipeline |
+| `GET` | `/api/leads/team/users` | Yes | All | Get list of sales reps and assignees |
+| `POST` | `/api/leads/import/preview` | Yes | All | Parse & preview CSV/PDF leads without writing to DB |
+| `POST` | `/api/leads/import` | Yes | All | Atomic batch ingestion of leads with duplicate handling |
+
+---
+
+### 1. System & Health
+
+#### `GET /api/health`
+- **Purpose**: Checks backend server liveness, PostgreSQL database engine status, and Prisma ORM runtime.
+- **Authentication**: None (Public)
+- **Response `200 OK`**:
+```json
+{
+  "status": "ok",
+  "database": "postgresql",
+  "orm": "prisma",
+  "time": "2026-10-23T10:55:00.000Z"
+}
+```
+
+---
+
+### 2. Authentication & Users (`/api/auth`)
+
+#### `POST /api/auth/register`
+- **Purpose**: Registers a new user account. Passwords must be at least 6 characters and are securely hashed using bcrypt. In self-registration, the user is always assigned the `user` role for safety.
+- **Authentication**: None (Public)
+- **Request Body**:
+```json
+{
+  "name": "Jane Doe",
+  "email": "jane@example.com",
+  "password": "password123",
+  "phone": "9876543210"
+}
+```
+- **Response `201 Created`**:
+```json
+{
+  "success": true,
+  "message": "User registered successfully",
+  "user": {
+    "id": "cm2l1...id",
+    "_id": "cm2l1...id",
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "role": "user"
+  }
+}
+```
+- **Error Responses**:
+  - `400 Bad Request`: Missing fields, invalid email format, password under 6 characters, or email already registered.
+
+#### `POST /api/auth/login`
+- **Purpose**: Authenticates credentials, verifies active status, and returns a signed 24-hour JWT token with user metadata.
+- **Authentication**: None (Public)
+- **Request Body**:
+```json
+{
+  "email": "admin@aflix.com",
+  "password": "password123"
+}
+```
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Login Successfully",
+  "msg": "Login Successfully",
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": "cm2k...",
+    "_id": "cm2k...",
+    "name": "Aflix Admin",
+    "email": "admin@aflix.com",
+    "role": "admin"
+  }
+}
+```
+- **Error Responses**:
+  - `400 Bad Request`: Email or password omitted.
+  - `401 Unauthorized`: Incorrect password or user account disabled.
+
+#### `GET /api/auth/me`
+- **Purpose**: Returns the authenticated user profile from their verified JWT token.
+- **Authentication**: Bearer Token (Any authenticated user)
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "user": {
+    "id": "cm2k...",
+    "_id": "cm2k...",
+    "name": "Aflix Admin",
+    "email": "admin@aflix.com",
+    "role": "admin",
+    "phone": "+91 9876543210",
+    "createdAt": "2026-10-01T08:00:00.000Z"
+  }
+}
+```
+
+#### `GET /api/auth/users`
+- **Purpose**: Retrieves all active system users for team management and administration.
+- **Authentication**: Bearer Token (`admin` and `manager` only)
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "count": 3,
+  "users": [
+    {
+      "id": "cm2...",
+      "_id": "cm2...",
+      "name": "Aflix Admin",
+      "email": "admin@aflix.com",
+      "role": "admin",
+      "phone": "+91 9876543210",
+      "createdAt": "2026-10-01T08:00:00.000Z"
+    }
+  ]
+}
+```
+- **Error Response**:
+  - `403 Forbidden`: If requested by standard `user` role.
+
+---
+
+### 3. Lead Management Core (`/api/leads`)
+
+#### `GET /api/leads` (or `GET /api/lead`)
+- **Purpose**: Fetches a paginated, filtered list of leads. Regular `user` accounts see only their assigned/owned leads; `admin` and `manager` accounts see organization-wide records.
+- **Authentication**: Bearer Token
+- **Query Parameters**:
+  | Parameter | Type | Default | Description |
+  |---|---|---|---|
+  | `page` | integer | `1` | Page number |
+  | `limit` | integer | `10` | Records per page (max: 100) |
+  | `search` | string | `""` | Search query across name, company, email, service, notes |
+  | `status` | string | `""` | Filter by stage (e.g. `New`, `Qualified`, or comma-separated `New,Proposal`) |
+  | `priority` | string | `""` | Filter by priority (`Low`, `Medium`, `High`, `Urgent`) |
+  | `source` | string | `""` | Filter by acquisition source (`Website`, `LinkedIn`, `Referral`, etc.) |
+  | `owner` | string | `""` | Filter by sales owner name or email |
+  | `archived` | string | `"false"` | `"false"` for active leads, `"true"` for archived leads |
+  | `duplicate`| string | `""` | Filter by `"true"` or `"false"` duplicate flag |
+  | `sortBy` | string | `"createdAt"` | Field: `createdAt`, `updatedAt`, `name`, `company`, `status`, `priority` |
+  | `sortOrder`| string | `"desc"` | Sort direction: `asc` or `desc` |
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "leads": [
+    {
+      "id": "cm2lead01...",
+      "_id": "cm2lead01...",
+      "name": "Aarav Sharma",
+      "company": "Apex Dynamics",
+      "email": "aarav@apexdynamics.in",
+      "phone": "+91 98201 12345",
+      "normalizedPhone": "919820112345",
+      "source": "Website",
+      "serviceInterested": "Full-Stack Web Application",
+      "budget": "₹5,00,000 - ₹15,00,000",
+      "status": "Qualified",
+      "priority": "High",
+      "owner": "Aflix User",
+      "notes": "Custom CRM requirement.",
+      "isArchived": false,
+      "isDuplicate": false,
+      "tasks": [
+        {
+          "id": "cm2task01...",
+          "_id": "cm2task01...",
+          "title": "Send Architecture Deck",
+          "type": "Email",
+          "dueDate": "2026-10-24T10:00:00.000Z",
+          "isCompleted": false,
+          "priority": "High"
+        }
+      ],
+      "activities": [
+        {
+          "id": "cm2act01...",
+          "_id": "cm2act01...",
+          "type": "created",
+          "description": "Lead created for Aarav Sharma from Apex Dynamics",
+          "performedBy": "Aflix User",
+          "timestamp": "2026-10-20T12:00:00.000Z"
+        }
+      ],
+      "createdAt": "2026-10-20T12:00:00.000Z",
+      "updatedAt": "2026-10-22T15:30:00.000Z"
+    }
+  ],
+  "pagination": {
+    "totalLeads": 12,
+    "page": 1,
+    "limit": 10,
+    "totalPages": 2,
+    "hasNextPage": true,
+    "hasPrevPage": false
+  }
+}
+```
+
+#### `POST /api/leads` (or `POST /api/lead`)
+- **Purpose**: Creates a new lead inside a PostgreSQL ACID transaction. Automatically generates the initial audit activity log (`created`) and optional follow-up tasks. If `preventDuplicates: true` or `allowDuplicate: false` and a matching contact exists, the creation is rejected with `409 Conflict`.
+- **Authentication**: Bearer Token
+- **Request Body**:
+```json
+{
+  "name": "Kavita Rao",
+  "company": "Zenith Cloud",
+  "email": "kavita@zenithcloud.com",
+  "phone": "+91 98111 22334",
+  "source": "LinkedIn",
+  "serviceInterested": "Mobile App Development",
+  "budget": "₹15,00,000 - ₹30,00,000",
+  "status": "New",
+  "priority": "Urgent",
+  "owner": "Aflix User",
+  "notes": "Requested urgent architecture call",
+  "preventDuplicates": false,
+  "tasks": [
+    {
+      "title": "Introductory Discovery Call",
+      "type": "Call",
+      "dueDate": "2026-10-25T11:00:00.000Z",
+      "priority": "Urgent"
+    }
+  ]
+}
+```
+- **Response `201 Created`**:
+```json
+{
+  "success": true,
+  "message": "Lead created successfully",
+  "lead": {
+    "id": "cm2lead02...",
+    "_id": "cm2lead02...",
+    "name": "Kavita Rao",
+    "company": "Zenith Cloud",
+    "email": "kavita@zenithcloud.com",
+    "phone": "+91 98111 22334",
+    "status": "New",
+    "priority": "Urgent",
+    "tasks": [...],
+    "activities": [...]
+  }
+}
+```
+- **Duplicate Prevention Response `409 Conflict`**:
+```json
+{
+  "success": false,
+  "isDuplicate": true,
+  "message": "Likely duplicate lead found matching by email and phone.",
+  "duplicateReasons": ["email", "phone"],
+  "duplicateMatches": [
+    {
+      "id": "cm2lead01...",
+      "name": "Kavita Rao",
+      "company": "Zenith Cloud"
+    }
+  ]
+}
+```
+
+#### `GET /api/leads/check-duplicate`
+- **Purpose**: Performs real-time validation for frontend forms as the user types email or phone number. Identifies matches without saving data.
+- **Authentication**: Bearer Token
+- **Query Parameters**:
+  - `email` (e.g. `john@acme.com`)
+  - `phone` (e.g. `9876543210`)
+  - `excludeId` (optional, skips current lead ID when editing)
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "isDuplicate": true,
+  "reasons": ["email"],
+  "matches": [
+    {
+      "id": "cm2lead...",
+      "name": "John Doe",
+      "company": "Acme Corp",
+      "email": "john@acme.com",
+      "phone": "+91 9876543210"
+    }
+  ]
+}
+```
+
+#### `GET /api/leads/:id`
+- **Purpose**: Retrieves a single lead with complete relational `followUps` and `activityLogs`. Enforces ownership scoping (standard users receive `403 Forbidden` if the lead is not assigned to them).
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "lead": {
+    "id": "cm2lead01...",
+    "_id": "cm2lead01...",
+    "name": "Aarav Sharma",
+    "company": "Apex Dynamics",
+    "email": "aarav@apexdynamics.in",
+    "phone": "+91 98201 12345",
+    "status": "Qualified",
+    "priority": "High",
+    "tasks": [...],
+    "activities": [...]
+  }
+}
+```
+- **Error Responses**:
+  - `404 Not Found`: Lead ID does not exist.
+  - `403 Forbidden`: Attempting to access an unassigned lead without manager/admin role.
+
+#### `PUT /api/leads/:id` (or `PUT /api/lead/:id`)
+- **Purpose**: Modifies lead fields. Automatically creates audit activity log records for changed fields (`name`, `company`, `email`, `status`, `priority`, `owner`) inside an atomic transaction. Standard users are restricted from reassigning lead ownership.
+- **Authentication**: Bearer Token
+- **Request Body**:
+```json
+{
+  "name": "Aarav Sharma",
+  "company": "Apex Dynamics Technologies Pvt Ltd",
+  "status": "Proposal",
+  "priority": "Urgent",
+  "budget": "₹15,00,000 - ₹30,00,000",
+  "notes": "Sent formal statement of work."
+}
+```
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Lead updated successfully",
+  "lead": { ... }
+}
+```
+
+#### `DELETE /api/leads/:id` (or `DELETE /api/lead/:id`)
+- **Purpose**: Permanently deletes a lead and cascades the deletion to all associated child tasks (`follow_ups`) and audit timeline entries (`activity_logs`).
+- **Authentication**: Bearer Token (`admin` and `manager` only)
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Lead and associated records deleted successfully"
+}
+```
+- **Error Response**:
+  - `403 Forbidden`: Standard `user` role cannot permanently delete leads.
+
+---
+
+### 4. Pipeline, Analytics & KPIs
+
+#### `GET /api/leads/stats`
+- **Purpose**: Aggregates top-level KPI metrics, stage distribution, win rate, priority counts, acquisition channel breakdown, and overdue task counters. Scoped to the individual user for standard accounts; organization-wide for managers and admins.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "stats": {
+    "total": 12,
+    "active": 10,
+    "archived": 2,
+    "duplicates": 1,
+    "highPriority": 4,
+    "overdueTasks": 2,
+    "upcomingTasks": 5,
+    "winRate": 75,
+    "byStatus": {
+      "New": 2,
+      "Contacted": 2,
+      "Qualified": 2,
+      "Proposal": 2,
+      "Won": 3,
+      "Lost": 1
+    },
+    "byPriority": {
+      "Low": 1,
+      "Medium": 5,
+      "High": 4,
+      "Urgent": 2
+    },
+    "bySource": {
+      "Website": 5,
+      "Referral": 3,
+      "LinkedIn": 4
+    }
+  }
+}
+```
+
+#### `GET /api/leads/pipeline`
+- **Purpose**: Powers the interactive Kanban Pipeline Board. Groups active leads into the 6 standard stages (`New`, `Contacted`, `Qualified`, `Proposal`, `Won`, `Lost`), calculates aggregate monetary pipeline deal values (in INR), computes the conversion funnel, and flags cards with overdue tasks.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "stages": {
+    "New": { "stage": "New", "leads": [...], "count": 2, "totalValue": 750000 },
+    "Contacted": { "stage": "Contacted", "leads": [...], "count": 2, "totalValue": 1200000 },
+    "Qualified": { "stage": "Qualified", "leads": [...], "count": 2, "totalValue": 2500000 },
+    "Proposal": { "stage": "Proposal", "leads": [...], "count": 2, "totalValue": 1800000 },
+    "Won": { "stage": "Won", "leads": [...], "count": 3, "totalValue": 4500000 },
+    "Lost": { "stage": "Lost", "leads": [...], "count": 1, "totalValue": 500000 }
+  },
+  "stageList": ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"],
+  "metrics": {
+    "totalActiveLeads": 12,
+    "highPriorityCount": 4,
+    "overdueTasksCount": 2,
+    "stageCounts": { "New": 2, "Contacted": 2, "Qualified": 2, "Proposal": 2, "Won": 3, "Lost": 1 },
+    "conversionFunnel": [
+      { "stage": "New", "count": 2, "percentage": 18 },
+      { "stage": "Contacted", "count": 2, "percentage": 18 },
+      { "stage": "Qualified", "count": 2, "percentage": 18 },
+      { "stage": "Proposal", "count": 2, "percentage": 18 },
+      { "stage": "Won", "count": 3, "percentage": 27 }
+    ],
+    "winRate": 75
+  }
+}
+```
+
+#### `PATCH /api/leads/:id/stage`
+- **Purpose**: Moves a deal from one sales stage to another (e.g. dragging a Kanban card or clicking 1-click stage advancement). Updates lead status and writes a `status_change` audit log.
+- **Authentication**: Bearer Token
+- **Request Body**:
+```json
+{
+  "stage": "Proposal",
+  "updatedBy": "Aflix User"
+}
+```
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Lead moved to Proposal",
+  "lead": {
+    "id": "cm2lead01...",
+    "status": "Proposal",
+    "updatedAt": "2026-10-23T11:00:00.000Z"
+  }
+}
+```
+
+---
+
+### 5. Follow-ups & Task Reminders
+
+#### `GET /api/leads/follow-ups/overview`
+- **Purpose**: Central follow-up task hub. Groups all pending tasks by urgency: **overdue**, **due today**, and **upcoming**, complete with lead contact information for instant calling/emailing.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "counts": {
+    "totalFollowUps": 8,
+    "completed": 3,
+    "pending": 5,
+    "overdue": 2,
+    "today": 1,
+    "upcoming": 2,
+    "urgent": 2
+  },
+  "tasks": {
+    "overdue": [
+      {
+        "id": "cm2task...",
+        "title": "Send Architecture Deck",
+        "type": "Email",
+        "dueDate": "2026-10-20T10:00:00.000Z",
+        "isCompleted": false,
+        "priority": "High",
+        "leadId": "cm2lead...",
+        "leadName": "Aarav Sharma",
+        "leadCompany": "Apex Dynamics"
+      }
+    ],
+    "today": [...],
+    "upcoming": [...]
+  }
+}
+```
+
+#### `POST /api/leads/:id/tasks`
+- **Purpose**: Schedules a new task on a lead with a specific due date, task type (`Call`, `Meeting`, `Email`, `Follow Up`), and priority. Writes a `task_added` activity log.
+- **Authentication**: Bearer Token
+- **Request Body**:
+```json
+{
+  "title": "Demo Presentation Call",
+  "type": "Meeting",
+  "dueDate": "2026-10-26T15:00:00.000Z",
+  "priority": "High",
+  "notes": "Demonstrate custom pipeline features",
+  "assignedTo": "Aflix User"
+}
+```
+- **Response `201 Created`**:
+```json
+{
+  "success": true,
+  "message": "Follow-up task scheduled",
+  "task": {
+    "id": "cm2task_new...",
+    "_id": "cm2task_new...",
+    "leadId": "cm2lead01...",
+    "title": "Demo Presentation Call",
+    "type": "Meeting",
+    "dueDate": "2026-10-26T15:00:00.000Z",
+    "isCompleted": false,
+    "priority": "High",
+    "assignedToName": "Aflix User"
+  }
+}
+```
+
+#### `PATCH /api/leads/:id/tasks/:taskId` & `PATCH /api/leads/tasks/:taskId`
+- **Purpose**: Checks off a task as completed (`isCompleted: true`) or edits task attributes. Automatically updates `completedAt` timestamp and logs `task_completed` or `task_updated` activity event.
+- **Authentication**: Bearer Token
+- **Request Body**:
+```json
+{
+  "isCompleted": true
+}
+```
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Task updated successfully",
+  "task": {
+    "id": "cm2task...",
+    "isCompleted": true,
+    "completedAt": "2026-10-23T11:15:00.000Z"
+  }
+}
+```
+
+#### `DELETE /api/leads/:id/tasks/:taskId`
+- **Purpose**: Deletes a scheduled task from a lead and writes a `task_deleted` audit entry.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Task deleted successfully"
+}
+```
+
+#### `GET /api/leads/:id/follow-ups`
+- **Purpose**: Returns the list of all tasks scheduled on a specific lead.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "count": 2,
+  "followUps": [
+    {
+      "id": "cm2task...",
+      "title": "Send Architecture Deck",
+      "dueDate": "2026-10-24T10:00:00.000Z",
+      "isCompleted": false
+    }
+  ]
+}
+```
+
+---
+
+### 6. Timeline & Activity Logs
+
+#### `POST /api/leads/:id/activities`
+- **Purpose**: Adds a custom activity or manual note to a lead's chronological audit timeline.
+- **Authentication**: Bearer Token
+- **Request Body**:
+```json
+{
+  "type": "note_added",
+  "description": "Client requested proposal revision to include AWS hosting cost estimates.",
+  "performedBy": "Aflix User"
+}
+```
+- **Response `201 Created`**:
+```json
+{
+  "success": true,
+  "message": "Activity recorded",
+  "activity": {
+    "id": "cm2act...",
+    "leadId": "cm2lead01...",
+    "type": "note_added",
+    "description": "Client requested proposal revision to include AWS hosting cost estimates.",
+    "performedBy": "Aflix User",
+    "timestamp": "2026-10-23T11:20:00.000Z"
+  }
+}
+```
+
+#### `GET /api/leads/:id/activity-logs`
+- **Purpose**: Retrieves the complete audit trail and chronological activity history for a lead.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "count": 4,
+  "activities": [
+    {
+      "id": "cm2act...",
+      "type": "status_change",
+      "description": "Pipeline stage moved from 'Contacted' to 'Qualified'",
+      "fieldName": "status",
+      "oldValue": "Contacted",
+      "newValue": "Qualified",
+      "performedBy": "Aflix User",
+      "timestamp": "2026-10-22T14:30:00.000Z"
+    }
+  ]
+}
+```
+
+---
+
+### 7. Lead Archiving & Restoration
+
+#### `PATCH /api/leads/:id/archive`
+- **Purpose**: Soft-archives a lead (`isArchived: true`), setting `archivedAt` timestamp and logging an `archived` activity. Keeps the lead in the database while removing it from default active pipeline views.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Lead archived successfully",
+  "lead": {
+    "id": "cm2lead01...",
+    "isArchived": true,
+    "archivedAt": "2026-10-23T11:25:00.000Z"
+  }
+}
+```
+
+#### `PATCH /api/leads/:id/unarchive`
+- **Purpose**: Restores an archived lead back to active status (`isArchived: false`), clearing `archivedAt` and logging a `restored` activity.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Lead restored successfully",
+  "lead": {
+    "id": "cm2lead01...",
+    "isArchived": false,
+    "archivedAt": null
+  }
+}
+```
+
+---
+
+### 8. Team Directory & Assignees
+
+#### `GET /api/leads/team/users`
+- **Purpose**: Fetches active team members for assignment dropdowns in lead modals and task forms.
+- **Authentication**: Bearer Token
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "users": [
+    {
+      "id": "cm2usr1...",
+      "_id": "cm2usr1...",
+      "name": "Aflix Admin",
+      "email": "admin@aflix.com",
+      "role": "admin",
+      "phone": "+91 9876543210"
+    },
+    {
+      "id": "cm2usr2...",
+      "_id": "cm2usr2...",
+      "name": "Aflix User",
+      "email": "user@aflix.com",
+      "role": "user",
+      "phone": "+91 98123 45678"
+    }
+  ]
+}
+```
+
+---
+
+### 9. CSV & PDF Lead Import Engine (`/api/leads/import`)
+
+#### `POST /api/leads/import/preview`
+- **Purpose**: Parses an uploaded `.csv` or text-based `.pdf` file in memory (up to 5MB, 500 rows) without modifying the database. Automatically resolves column headers, extracts rows, validates email and phone formatting, and checks for intra-file and database duplicates (masking unauthorized lead names to `Confidential Lead`).
+- **Authentication**: Bearer Token
+- **Content-Type**: `multipart/form-data`
+  - Field: `file` (Binary file content)
+  - Field: `mapping` (Optional JSON string with custom column mappings)
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "fileName": "q4_leads.csv",
+  "fileType": "CSV",
+  "fileSize": 14200,
+  "headers": ["Lead Name", "Work Email", "Mobile", "Company", "Deal Value"],
+  "mapping": {
+    "name": "Lead Name",
+    "email": "Work Email",
+    "phone": "Mobile",
+    "company": "Company",
+    "budget": "Deal Value"
+  },
+  "summary": {
+    "total": 5,
+    "valid": 4,
+    "duplicate": 1,
+    "invalid": 0
+  },
+  "rows": [
+    {
+      "rowNumber": 1,
+      "data": {
+        "name": "Rajesh Gupta",
+        "email": "rajesh@techcorp.in",
+        "phone": "+91 98200 11223",
+        "company": "TechCorp India",
+        "budget": "₹10,00,000",
+        "status": "New",
+        "priority": "Medium"
+      },
+      "status": "valid",
+      "validationErrors": [],
+      "duplicateReasons": [],
+      "duplicateMatches": []
+    }
+  ],
+  "warning": null
+}
+```
+
+#### `POST /api/leads/import`
+- **Purpose**: Commits approved candidate leads into the PostgreSQL database using bounded ACID transactions (50 records per chunk). Enforces role ownership (standard users forced to self-assignment), skips duplicates idempotently, and logs canonical `imported` activity entries.
+- **Authentication**: Bearer Token
 - **Content-Type**: `application/json`
-- **Payload**: `{ leads: [...], skipDuplicates: boolean }`
+- **Request Body**:
+```json
+{
+  "leads": [
+    {
+      "rowNumber": 1,
+      "data": {
+        "name": "Rajesh Gupta",
+        "email": "rajesh@techcorp.in",
+        "phone": "+91 98200 11223",
+        "company": "TechCorp India",
+        "budget": "₹10,00,000",
+        "status": "New",
+        "priority": "High"
+      }
+    }
+  ],
+  "options": {
+    "skipDuplicates": true,
+    "defaultStatus": "New",
+    "defaultPriority": "Medium",
+    "defaultSource": "Import"
+  }
+}
+```
+- **Response `200 OK`**:
+```json
+{
+  "success": true,
+  "message": "Import complete: 1 imported, 0 skipped duplicates, 0 failed.",
+  "summary": {
+    "totalProcessed": 1,
+    "importedCount": 1,
+    "skippedCount": 0,
+    "duplicateCount": 0,
+    "failedCount": 0
+  },
+  "importedLeads": [
+    {
+      "id": "cm2lead_new...",
+      "name": "Rajesh Gupta",
+      "email": "rajesh@techcorp.in",
+      "status": "New"
+    }
+  ],
+  "errors": []
+}
+```
+
+---
 
 ---
 
