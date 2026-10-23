@@ -432,7 +432,7 @@ export const LeadFormModal: React.FC<LeadFormModalProps> = ({
           <button
             type="submit"
             disabled={isSubmitting}
-            className="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors disabled:opacity-50"
+            className="px-4 py-2 text-xs font-semibold rounded-lg btn-gradient cursor-pointer disabled:opacity-50"
           >
             {isSubmitting ? 'Saving...' : leadToEdit ? 'Save Changes' : 'Create Lead'}
           </button>

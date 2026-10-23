@@ -596,7 +596,7 @@ export const LeadImportModal: React.FC<LeadImportModalProps> = ({
                         <button
                           type="button"
                           onClick={handleReapplyMapping}
-                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                          className="px-3.5 py-1.5 rounded-lg btn-gradient font-bold text-xs cursor-pointer"
                         >
                           Re-apply Mapping
                         </button>
@@ -921,7 +921,7 @@ export const LeadImportModal: React.FC<LeadImportModalProps> = ({
                 <button
                   type="button"
                   onClick={handleFinish}
-                  className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 font-bold text-white text-xs sm:text-sm rounded-xl shadow-xs transition-colors cursor-pointer"
+                  className="px-6 py-2.5 rounded-xl btn-gradient font-bold text-xs sm:text-sm cursor-pointer"
                 >
                   Done & View Leads Table
                 </button>

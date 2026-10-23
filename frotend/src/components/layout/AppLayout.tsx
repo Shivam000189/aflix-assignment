@@ -10,7 +10,6 @@ import { useToast } from '../../context/ToastContext';
 
 export const AppLayout: React.FC = () => {
   const { showToast } = useToast();
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isNewLeadOpen, setIsNewLeadOpen] = useState(false);
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [leadToEdit, setLeadToEdit] = useState<Lead | null>(null);
@@ -50,7 +49,6 @@ export const AppLayout: React.FC = () => {
   return (
     <div className="h-screen bg-slate-50 flex flex-col font-sans overflow-hidden">
       <Navbar
-        onMenuToggle={() => setIsMobileMenuOpen(true)}
         overdueCount={overdueCount}
         onNewLeadClick={() => {
           setLeadToEdit(null);
@@ -58,15 +56,11 @@ export const AppLayout: React.FC = () => {
         }}
       />
 
-      <div className="flex-1 flex min-h-0 overflow-hidden">
-        <Sidebar
-          isOpen={isMobileMenuOpen}
-          onClose={() => setIsMobileMenuOpen(false)}
-          overdueCount={overdueCount}
-        />
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
+        <Sidebar overdueCount={overdueCount} />
 
         <main className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-          <div className="p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
+          <div className="p-4 sm:p-6 lg:p-8 pb-20 sm:pb-24 lg:pb-8 max-w-7xl mx-auto w-full">
             <Outlet
               context={{
                 onOpenLead: handleOpenLeadDetails,

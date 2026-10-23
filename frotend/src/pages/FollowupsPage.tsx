@@ -137,7 +137,7 @@ export const FollowupsPage: React.FC = () => {
         </div>
         <button
           onClick={() => setIsModalOpen(true)}
-          className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors self-start sm:self-auto"
+          className="px-3.5 py-1.5 text-xs font-semibold rounded-lg btn-gradient cursor-pointer self-start sm:self-auto"
         >
           + Add Follow-up Task
         </button>
@@ -470,7 +470,7 @@ export const FollowupsPage: React.FC = () => {
             </button>
             <button
               type="submit"
-              className="px-4 py-1.5 font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs"
+              className="px-4 py-1.5 text-xs font-semibold rounded-lg btn-gradient cursor-pointer"
             >
               Schedule Task
             </button>

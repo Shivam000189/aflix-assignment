@@ -23,7 +23,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
       {actionText && onAction && (
         <button
           onClick={onAction}
-          className="px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors shadow-sm"
+          className="px-3.5 py-1.5 text-xs font-semibold rounded-lg btn-gradient cursor-pointer"
         >
           {actionText}
         </button>

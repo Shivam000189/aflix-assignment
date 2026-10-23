@@ -309,7 +309,7 @@ export default function AuthPage({ initialMode }: AuthPageProps) {
                 <label htmlFor="login-password" className="block text-[11px] sm:text-xs font-bold text-slate-700">
                   Password
                 </label>
-                <span className="text-[10px] text-slate-400">Default: password123</span>
+                {/* <span className="text-[10px] text-slate-400">Default: password123</span> */}
               </div>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">

@@ -413,7 +413,7 @@ export const LeadDetailDrawer: React.FC<LeadDetailDrawerProps> = ({
                     </button>
                     <button
                       type="submit"
-                      className="px-3 py-1 font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded shadow-2xs"
+                      className="px-3 py-1 font-semibold rounded-lg btn-gradient cursor-pointer text-xs"
                     >
                       Save Task
                     </button>

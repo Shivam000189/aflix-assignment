@@ -91,7 +91,7 @@ export const DashboardPage: React.FC = () => {
           </button>
           <button
             onClick={onNewLead}
-            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors"
+            className="px-3.5 py-1.5 text-xs font-semibold rounded-lg btn-gradient cursor-pointer"
           >
             + New Lead
           </button>
