@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
 const connectDB = require('./config/db');
 const authMiddleware = require('./middleware/authMIddleware');
@@ -24,9 +25,38 @@ app.get('/api/health', (req, res) => {
 app.use('/api/leads', authMiddleware, require('./routes/LeadRoutes'));
 app.use('/api/lead', authMiddleware, require('./routes/LeadRoutes')); // Alias for flexibility
 
-// Serve frontend static files if available
-const frontendPath = path.join(__dirname, '../frontend');
-app.use(express.static(frontendPath));
+// API 404 Guard: Ensure unhandled /api/* requests return JSON 404 and never HTML
+app.use('/api', (req, res) => {
+    res.status(404).json({
+        success: false,
+        message: `API endpoint '${req.method} ${req.originalUrl}' not found`
+    });
+});
+
+// Resolve built frontend distribution directory (checks ../frotend/dist, ../frontend/dist, ../frotend)
+const possibleDistPaths = [
+    path.resolve(__dirname, '../frotend/dist'),
+    path.resolve(__dirname, '../frontend/dist'),
+    path.resolve(__dirname, '../frotend')
+];
+const frontendDistPath = possibleDistPaths.find(p => fs.existsSync(p));
+
+if (frontendDistPath) {
+    app.use(express.static(frontendDistPath));
+
+    // Client-side SPA routing fallback: serve index.html for non-API client routes
+    app.use((req, res) => {
+        const indexPath = path.join(frontendDistPath, 'index.html');
+        if (fs.existsSync(indexPath)) {
+            res.sendFile(indexPath);
+        } else {
+            res.status(404).json({
+                success: false,
+                message: 'Frontend application build not found. Run npm run build in the frontend directory.'
+            });
+        }
+    });
+}
 
 const PORT = parseInt(process.env.PORT, 10) || 5000;
 

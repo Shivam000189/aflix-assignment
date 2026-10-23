@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { crmApi, isOverdue, isDueToday } from '../services/api';
+import { crmApi, isOverdue, isDueToday, getLocalTodayDateString } from '../services/api';
 import type { FollowUp, FollowUpType, Lead } from '../types/crm';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { Modal } from '../components/common/Modal';
@@ -29,7 +29,7 @@ export const FollowupsPage: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [selectedLeadId, setSelectedLeadId] = useState('');
   const [title, setTitle] = useState('');
-  const [dueDate, setDueDate] = useState(new Date().toISOString().split('T')[0]);
+  const [dueDate, setDueDate] = useState(() => getLocalTodayDateString());
   const [taskType, setTaskType] = useState<FollowUpType>('Call');
   const [notes, setNotes] = useState('');
 

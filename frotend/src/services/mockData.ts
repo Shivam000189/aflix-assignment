@@ -2,7 +2,8 @@ import type { Lead, FollowUp, ActivityLog, User } from '../types/crm';
 
 // Helpers to create relative dates
 const now = new Date();
-const formatDate = (date: Date): string => date.toISOString().split('T')[0];
+const formatDate = (date: Date): string =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const subDays = (d: number): string => {
   const target = new Date(now.getTime() - d * 24 * 60 * 60 * 1000);
   return target.toISOString();

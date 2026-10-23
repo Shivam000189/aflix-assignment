@@ -77,6 +77,12 @@ async function testApi() {
         const regAuthData = await regAuthRes.json();
         if (regAuthRes.status !== 201) throw new Error('Auth registration failed: ' + regAuthData.message);
 
+        // Ensure api_test_auth has manager role so administrative operations succeed
+        await prisma.user.update({
+            where: { email: 'api_test_auth@example.com' },
+            data: { role: 'manager' }
+        });
+
         const loginRes = await fetch(`${AUTH_URL}/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -438,6 +444,386 @@ async function testApi() {
         }
         console.log('21.2 Cascade Deletion Verification: PASSED (Zero orphaned records)');
 
+        // =========================================================================
+        // PHASE 1: SECURITY HARDENING REGRESSION TEST SUITE (Tasks 1 - 6)
+        // =========================================================================
+        console.log('\n======================================================');
+        console.log('Testing Phase 1: Security Hardening & Authorization');
+        console.log('======================================================\n');
+
+        // Helper to register and login a test user with a specific role
+        async function setupTestUser(name, email, password, role) {
+            await fetch(`${AUTH_URL}/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, email, password })
+            });
+
+            if (role && role !== 'user') {
+                await prisma.user.update({
+                    where: { email },
+                    data: { role }
+                });
+            }
+
+            const loginRes = await fetch(`${AUTH_URL}/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+            });
+            const loginData = await loginRes.json();
+            return {
+                user: loginData.user,
+                token: loginData.token,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${loginData.token}`
+                }
+            };
+        }
+
+        const userA = await setupTestUser('API_User_A', 'api_test_user_a@example.com', 'PassUserA123!', 'user');
+        const userB = await setupTestUser('API_User_B', 'api_test_user_b@example.com', 'PassUserB123!', 'user');
+        const legacyRep = await setupTestUser('API_Legacy_Rep', 'api_test_legacy_rep@example.com', 'PassLegacy123!', 'sales_rep');
+        const adminUser = await setupTestUser('API_Admin_User', 'api_test_admin@example.com', 'PassAdmin123!', 'admin');
+
+        // -------------------------------------------------------------
+        // Task 1: User-Directory Endpoint Security (GET /api/auth/users)
+        // -------------------------------------------------------------
+        console.log('\n--- Task 1: User Directory Endpoint Security ---');
+
+        // 1.1 Unauthenticated request rejected with 401
+        const unauthUsersRes = await fetch(`${AUTH_URL}/users`);
+        console.log('1.1 GET /api/auth/users without token:', unauthUsersRes.status, '(401 Expected)');
+        if (unauthUsersRes.status !== 401) throw new Error('Expected 401 Unauthorized for /api/auth/users without token');
+
+        // 1.2 Standard user rejected with 403
+        const stdUserUsersRes = await fetch(`${AUTH_URL}/users`, { headers: userA.headers });
+        console.log('1.2 GET /api/auth/users as standard user:', stdUserUsersRes.status, '(403 Expected)');
+        if (stdUserUsersRes.status !== 403) throw new Error('Expected 403 Forbidden for standard user on /api/auth/users');
+
+        // 1.3 Legacy sales_rep rejected with 403 (fail-closed)
+        const legacyUsersRes = await fetch(`${AUTH_URL}/users`, { headers: legacyRep.headers });
+        console.log('1.3 GET /api/auth/users as legacy sales_rep:', legacyUsersRes.status, '(403 Expected)');
+        if (legacyUsersRes.status !== 403) throw new Error('Expected 403 Forbidden for legacy sales_rep on /api/auth/users');
+
+        // 1.4 Manager allowed with 200
+        const managerUsersRes = await fetch(`${AUTH_URL}/users`, { headers: authHeaders });
+        const managerUsersData = await managerUsersRes.json();
+        console.log('1.4 GET /api/auth/users as manager:', managerUsersRes.status, 'Count:', managerUsersData.count);
+        if (managerUsersRes.status !== 200 || !Array.isArray(managerUsersData.users)) {
+            throw new Error('Manager failed to access /api/auth/users');
+        }
+
+        // 1.5 Admin allowed with 200
+        const adminUsersRes = await fetch(`${AUTH_URL}/users`, { headers: adminUser.headers });
+        console.log('1.5 GET /api/auth/users as admin:', adminUsersRes.status, '(200 Expected)');
+        if (adminUsersRes.status !== 200) throw new Error('Admin failed to access /api/auth/users');
+
+        // 1.6 Verify NO password hashes or secrets in user response
+        const hasExposedSecrets = managerUsersData.users.some(u => u.password || u.hash || u.salt || u.token);
+        console.log('1.6 User list contains NO password hashes or sensitive fields:', !hasExposedSecrets);
+        if (hasExposedSecrets) throw new Error('User directory leaks sensitive credentials');
+
+        // -------------------------------------------------------------
+        // Task 2 & Task 3: Object-Level Authorization (IDOR Protections)
+        // -------------------------------------------------------------
+        console.log('\n--- Task 2 & 3: Object-Level Authorization on Leads & Follow-ups ---');
+
+        // Setup: User A creates a lead and follow-up task
+        const createLeadARes = await fetch(`${BASE_URL}`, {
+            method: 'POST',
+            headers: userA.headers,
+            body: JSON.stringify({
+                name: 'API_TEST_Private_Lead_A',
+                company: 'User A Corp',
+                email: 'lead_a@example.com',
+                phone: '+1 555-100-2000',
+                status: 'New',
+                priority: 'High',
+                notes: 'Confidential client data owned by User A'
+            })
+        });
+        const createLeadAData = await createLeadARes.json();
+        const leadAId = createLeadAData.lead._id || createLeadAData.lead.id;
+        console.log('Setup: User A created Lead A:', leadAId);
+
+        const createTaskARes = await fetch(`${BASE_URL}/${leadAId}/tasks`, {
+            method: 'POST',
+            headers: userA.headers,
+            body: JSON.stringify({
+                title: 'User A Follow-up Task',
+                type: 'Call',
+                dueDate: new Date(Date.now() + 86400000).toISOString(),
+                priority: 'High'
+            })
+        });
+        const createTaskAData = await createTaskARes.json();
+        const taskAId = createTaskAData.task._id || createTaskAData.task.id;
+        console.log('Setup: User A added task to Lead A:', taskAId);
+
+        // Record initial activity log count on Lead A
+        const initialActivityCount = await prisma.activityLog.count({ where: { leadId: leadAId } });
+
+        // 2.1 User B cannot read User A's lead
+        const userBGetLeadRes = await fetch(`${BASE_URL}/${leadAId}`, { headers: userB.headers });
+        console.log('2.1 User B GET Lead A:', userBGetLeadRes.status, '(403 Expected)');
+        if (userBGetLeadRes.status !== 403) throw new Error('Expected 403 for User B viewing Lead A');
+
+        // 2.2 User B cannot update User A's lead
+        const userBPutLeadRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'PUT',
+            headers: userB.headers,
+            body: JSON.stringify({ company: 'Hacked by User B' })
+        });
+        console.log('2.2 User B PUT Lead A:', userBPutLeadRes.status, '(403 Expected)');
+        if (userBPutLeadRes.status !== 403) throw new Error('Expected 403 for User B updating Lead A');
+
+        // 2.3 User B cannot change stage on User A's lead
+        const userBStageRes = await fetch(`${BASE_URL}/${leadAId}/stage`, {
+            method: 'PATCH',
+            headers: userB.headers,
+            body: JSON.stringify({ stage: 'Won' })
+        });
+        console.log('2.3 User B PATCH stage on Lead A:', userBStageRes.status, '(403 Expected)');
+        if (userBStageRes.status !== 403) throw new Error('Expected 403 for User B changing stage on Lead A');
+
+        // 2.4 User B cannot archive User A's lead
+        const userBArchiveRes = await fetch(`${BASE_URL}/${leadAId}/archive`, {
+            method: 'PATCH',
+            headers: userB.headers
+        });
+        console.log('2.4 User B PATCH archive on Lead A:', userBArchiveRes.status, '(403 Expected)');
+        if (userBArchiveRes.status !== 403) throw new Error('Expected 403 for User B archiving Lead A');
+
+        // 2.5 User B cannot unarchive User A's lead
+        const userBUnarchiveRes = await fetch(`${BASE_URL}/${leadAId}/unarchive`, {
+            method: 'PATCH',
+            headers: userB.headers
+        });
+        console.log('2.5 User B PATCH unarchive on Lead A:', userBUnarchiveRes.status, '(403 Expected)');
+        if (userBUnarchiveRes.status !== 403) throw new Error('Expected 403 for User B unarchiving Lead A');
+
+        // 2.6 User B cannot delete User A's lead
+        const userBDelRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'DELETE',
+            headers: userB.headers
+        });
+        console.log('2.6 User B DELETE Lead A:', userBDelRes.status, '(403 Expected)');
+        if (userBDelRes.status !== 403) throw new Error('Expected 403 for User B deleting Lead A');
+
+        // 2.7 User A (standard user) cannot delete own lead (deletion restricted to admin/manager)
+        const userADelRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'DELETE',
+            headers: userA.headers
+        });
+        console.log('2.7 User A (standard user) DELETE own lead:', userADelRes.status, '(403 Expected)');
+        if (userADelRes.status !== 403) throw new Error('Expected 403 for standard user deleting own lead');
+
+        // 2.8 User B cannot inject manual activity on User A's lead
+        const userBActRes = await fetch(`${BASE_URL}/${leadAId}/activities`, {
+            method: 'POST',
+            headers: userB.headers,
+            body: JSON.stringify({ description: 'Malicious injected activity', action: 'Malicious injected activity', type: 'note_added' })
+        });
+        console.log('2.8 User B POST activity on Lead A:', userBActRes.status, '(403 Expected)');
+        if (userBActRes.status !== 403) throw new Error('Expected 403 for User B posting activity on Lead A');
+
+        // 2.9 User B cannot add task to User A's lead
+        const userBAddTaskRes = await fetch(`${BASE_URL}/${leadAId}/tasks`, {
+            method: 'POST',
+            headers: userB.headers,
+            body: JSON.stringify({ title: 'Malicious task', dueDate: new Date().toISOString() })
+        });
+        console.log('2.9 User B POST task on Lead A:', userBAddTaskRes.status, '(403 Expected)');
+        if (userBAddTaskRes.status !== 403) throw new Error('Expected 403 for User B adding task to Lead A');
+
+        // 2.10 User B cannot complete User A's task via /:id/tasks/:taskId
+        const userBCompleteTaskRes = await fetch(`${BASE_URL}/${leadAId}/tasks/${taskAId}`, {
+            method: 'PATCH',
+            headers: userB.headers,
+            body: JSON.stringify({ isCompleted: true })
+        });
+        console.log('2.10 User B PATCH /:id/tasks/:taskId on Lead A:', userBCompleteTaskRes.status, '(403 Expected)');
+        if (userBCompleteTaskRes.status !== 403) throw new Error('Expected 403 for User B completing task on Lead A');
+
+        // 2.11 User B cannot complete User A's task via /tasks/:taskId (direct IDOR attack)
+        const userBDirectTaskRes = await fetch(`${BASE_URL}/tasks/${taskAId}`, {
+            method: 'PATCH',
+            headers: userB.headers,
+            body: JSON.stringify({ isCompleted: true })
+        });
+        console.log('2.11 User B PATCH /tasks/:taskId direct attack:', userBDirectTaskRes.status, '(403 Expected)');
+        if (userBDirectTaskRes.status !== 403) throw new Error('Expected 403 for User B direct task modification');
+
+        // 2.12 User B cannot delete User A's task
+        const userBDelTaskRes = await fetch(`${BASE_URL}/${leadAId}/tasks/${taskAId}`, {
+            method: 'DELETE',
+            headers: userB.headers
+        });
+        console.log('2.12 User B DELETE /:id/tasks/:taskId on Lead A:', userBDelTaskRes.status, '(403 Expected)');
+        if (userBDelTaskRes.status !== 403) throw new Error('Expected 403 for User B deleting task on Lead A');
+
+        // 2.13 Cross-lead task mismatch check (Task A does not belong to Lead A2)
+        const createLeadA2Res = await fetch(`${BASE_URL}`, {
+            method: 'POST',
+            headers: userA.headers,
+            body: JSON.stringify({
+                name: 'API_TEST_Private_Lead_A2',
+                company: 'User A Corp Second',
+                email: 'lead_a2@example.com'
+            })
+        });
+        const createLeadA2Data = await createLeadA2Res.json();
+        const leadA2Id = createLeadA2Data.lead._id || createLeadA2Data.lead.id;
+
+        const crossLeadTaskRes = await fetch(`${BASE_URL}/${leadA2Id}/tasks/${taskAId}`, {
+            method: 'PATCH',
+            headers: userA.headers,
+            body: JSON.stringify({ isCompleted: true })
+        });
+        console.log('2.13 Mismatched parent lead and task ID:', crossLeadTaskRes.status, '(404/400 Expected)');
+        if (![400, 404].includes(crossLeadTaskRes.status)) throw new Error('Expected 404 or 400 for task not belonging to lead');
+
+        // -------------------------------------------------------------
+        // Task 4: Prevent Unauthorized Lead Ownership & Assignment Changes
+        // -------------------------------------------------------------
+        console.log('\n--- Task 4: Prevention of Ownership & Assignment Tampering ---');
+
+        // 4.1 Standard User A cannot change owner field
+        const tamperOwnerRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'PUT',
+            headers: userA.headers,
+            body: JSON.stringify({ owner: 'Malicious_New_Owner' })
+        });
+        console.log('4.1 User A attempting to modify owner field:', tamperOwnerRes.status, '(403 Expected)');
+        if (tamperOwnerRes.status !== 403) throw new Error('Expected 403 for standard user changing lead owner');
+
+        // 4.2 Standard User A cannot change assignedToId
+        const tamperAssignRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'PUT',
+            headers: userA.headers,
+            body: JSON.stringify({ assignedToId: '00000000-0000-0000-0000-000000000000' })
+        });
+        console.log('4.2 User A attempting to modify assignedToId:', tamperAssignRes.status, '(403 Expected)');
+        if (tamperAssignRes.status !== 403) throw new Error('Expected 403 for standard user changing assignedToId');
+
+        // 4.3 Standard User A cannot change createdById
+        const tamperCreatorRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'PUT',
+            headers: userA.headers,
+            body: JSON.stringify({ createdById: '00000000-0000-0000-0000-000000000000' })
+        });
+        console.log('4.3 User A attempting to modify createdById:', tamperCreatorRes.status, '(403 Expected)');
+        if (tamperCreatorRes.status !== 403) throw new Error('Expected 403 for standard user changing createdById');
+
+        // 4.4 Standard User A CAN legitimately update permitted lead fields
+        const legitimateUpdateRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'PUT',
+            headers: userA.headers,
+            body: JSON.stringify({
+                notes: 'Legitimately updated notes by authorized owner',
+                budget: '₹15,00,000'
+            })
+        });
+        console.log('4.4 User A updating normal fields (notes/budget):', legitimateUpdateRes.status, '(200 Expected)');
+        if (legitimateUpdateRes.status !== 200) throw new Error('Standard user legitimate lead update failed');
+
+        // -------------------------------------------------------------
+        // Task 5: Fail-Closed Role Scope Safety
+        // -------------------------------------------------------------
+        console.log('\n--- Task 5: Fail-Closed Role Scope Safety ---');
+
+        // 5.1 Legacy sales_rep cannot see User A's private lead in list
+        const legacyLeadsRes = await fetch(`${BASE_URL}?search=API_TEST_Private_Lead_A`, {
+            headers: legacyRep.headers
+        });
+        const legacyLeadsData = await legacyLeadsRes.json();
+        const legacyFoundPrivate = legacyLeadsData.leads.some(l => (l._id || l.id) === leadAId);
+        console.log('5.1 Legacy sales_rep denied access to other user lead in list:', !legacyFoundPrivate);
+        if (legacyFoundPrivate) throw new Error('Fail-closed violation: legacy sales_rep accessed unscoped lead');
+
+        // 5.2 Legacy sales_rep cannot access GET /:id of User A's lead
+        const legacySingleRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            headers: legacyRep.headers
+        });
+        console.log('5.2 Legacy sales_rep GET single lead A:', legacySingleRes.status, '(403 Expected)');
+        if (legacySingleRes.status !== 403) throw new Error('Fail-closed violation: legacy sales_rep accessed single lead');
+
+        // -------------------------------------------------------------
+        // Task 7 (from prompt): Admin & Manager Privileged Operations Retained
+        // -------------------------------------------------------------
+        console.log('\n--- Task 7: Manager & Admin Privileged Operations ---');
+
+        // 7.1 Manager can view User A's lead
+        const managerGetRes = await fetch(`${BASE_URL}/${leadAId}`, { headers: authHeaders });
+        console.log('7.1 Manager GET Lead A:', managerGetRes.status, '(200 Expected)');
+        if (managerGetRes.status !== 200) throw new Error('Manager failed to view Lead A');
+
+        // 7.2 Manager can reassign lead ownership
+        const managerReassignRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'PUT',
+            headers: authHeaders,
+            body: JSON.stringify({ owner: 'Shivam S.' })
+        });
+        console.log('7.2 Manager reassigning lead owner:', managerReassignRes.status, '(200 Expected)');
+        if (managerReassignRes.status !== 200) throw new Error('Manager failed to reassign lead');
+
+        // 7.3 Manager can archive lead
+        const managerArchiveRes = await fetch(`${BASE_URL}/${leadAId}/archive`, {
+            method: 'PATCH',
+            headers: authHeaders
+        });
+        console.log('7.3 Manager archiving Lead A:', managerArchiveRes.status, '(200 Expected)');
+        if (managerArchiveRes.status !== 200) throw new Error('Manager failed to archive lead');
+
+        // 7.4 Manager can unarchive lead
+        const managerUnarchiveRes = await fetch(`${BASE_URL}/${leadAId}/unarchive`, {
+            method: 'PATCH',
+            headers: authHeaders
+        });
+        console.log('7.4 Manager unarchiving Lead A:', managerUnarchiveRes.status, '(200 Expected)');
+        if (managerUnarchiveRes.status !== 200) throw new Error('Manager failed to unarchive lead');
+
+        // -------------------------------------------------------------
+        // Task 8 (from prompt): Verification of Database Invariance
+        // -------------------------------------------------------------
+        console.log('\n--- Task 8: Database & Activity Invariance After Unauthorized Attacks ---');
+
+        // 8.1 Verify Task A is still NOT completed despite User B's attacks
+        const currentTaskA = await prisma.followUp.findUnique({ where: { id: taskAId } });
+        console.log('8.1 Task A remains uncompleted in DB:', currentTaskA && !currentTaskA.isCompleted);
+        if (!currentTaskA || currentTaskA.isCompleted) {
+            throw new Error('Database invariance violated: Task A was modified by unauthorized requests');
+        }
+
+        // 8.2 Verify no unauthorized activity logs were generated by User B
+        const userBActivities = await prisma.activityLog.findMany({
+            where: {
+                leadId: leadAId,
+                performedById: userB.user.id
+            }
+        });
+        console.log('8.2 Fraudulent activity logs generated by User B:', userBActivities.length, '(0 Expected)');
+        if (userBActivities.length > 0) {
+            throw new Error('Database invariance violated: unauthorized activity logs were inserted');
+        }
+
+        // 7.5 Admin can permanently delete lead
+        const adminDelRes = await fetch(`${BASE_URL}/${leadAId}`, {
+            method: 'DELETE',
+            headers: adminUser.headers
+        });
+        console.log('7.5 Admin DELETE Lead A:', adminDelRes.status, '(200 Expected)');
+        if (adminDelRes.status !== 200) throw new Error('Admin failed to delete Lead A');
+
+        // Clean up Lead A2
+        await fetch(`${BASE_URL}/${leadA2Id}`, {
+            method: 'DELETE',
+            headers: adminUser.headers
+        });
+
+        console.log('\n>>> ALL SECURITY REGRESSION TESTS (TASKS 1-8) PASSED SUCCESSFULLY! <<<');
         console.log('\n>>> ALL TESTS (AUTH SECURITY, PROTECTED ROUTES, LEADS, PIPELINE, RELATIONAL TABLES, CONSTRAINTS & TRANSACTIONS) PASSED ON POSTGRESQL! <<<');
 
     } finally {

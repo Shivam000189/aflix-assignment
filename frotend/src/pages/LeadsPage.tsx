@@ -7,6 +7,7 @@ import { EmptyState } from '../components/common/EmptyState';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { PipelineKanban } from '../components/pipeline/PipelineKanban';
 import { useToast } from '../context/ToastContext';
+import { LeadImportModal } from '../components/leads/LeadImportModal';
 
 interface OutletContextType {
   onOpenLead: (id: string) => void;
@@ -46,6 +47,7 @@ export const LeadsPage: React.FC = () => {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   // Filters
   const [search, setSearch] = useState('');
@@ -156,8 +158,21 @@ export const LeadsPage: React.FC = () => {
           </div>
 
           <button
+            onClick={() => setIsImportModalOpen(true)}
+            className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-2xs transition-colors flex items-center gap-1.5 cursor-pointer"
+            title="Import leads from CSV or PDF"
+          >
+            <svg className="w-3.5 h-3.5 text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            <span>Import Leads</span>
+          </button>
+
+          <button
             onClick={onNewLead}
-            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors"
+            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer"
           >
             + New Lead
           </button>
@@ -446,6 +461,16 @@ export const LeadsPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* CSV and PDF Lead Import Modal */}
+      <LeadImportModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onSuccess={() => {
+          triggerRefresh();
+          fetchLeads();
+        }}
+      />
     </div>
   );
 };

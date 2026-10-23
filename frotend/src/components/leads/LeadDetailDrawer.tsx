@@ -6,7 +6,7 @@ import type {
   LeadStatus,
   FollowUpType,
 } from '../../types/crm';
-import { crmApi, isOverdue } from '../../services/api';
+import { crmApi, isOverdue, getLocalTodayDateString } from '../../services/api';
 import { PriorityBadge } from '../common/Badge';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { useToast } from '../../context/ToastContext';
@@ -43,7 +43,7 @@ export const LeadDetailDrawer: React.FC<LeadDetailDrawerProps> = ({
   // New follow-up task form state
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
-  const [taskDueDate, setTaskDueDate] = useState(new Date().toISOString().split('T')[0]);
+  const [taskDueDate, setTaskDueDate] = useState(() => getLocalTodayDateString());
   const [taskType, setTaskType] = useState<FollowUpType>('Call');
   const [taskNotes, setTaskNotes] = useState('');
 
@@ -147,11 +147,15 @@ export const LeadDetailDrawer: React.FC<LeadDetailDrawerProps> = ({
     }
   };
 
-  const handleToggleTask = async (taskId: string) => {
+  const handleToggleTask = async (taskId: string, currentCompleted?: boolean) => {
     try {
-      await crmApi.toggleFollowUp(taskId);
-      showToast('Task updated', 'success');
-      loadData();
+      await crmApi.toggleFollowUp(
+        taskId,
+        lead?.id,
+        currentCompleted !== undefined ? !currentCompleted : undefined
+      );
+      showToast('Task status updated', 'success');
+      await loadData();
       onLeadUpdated();
     } catch (err: any) {
       showToast(err.message, 'error');
@@ -437,7 +441,7 @@ export const LeadDetailDrawer: React.FC<LeadDetailDrawerProps> = ({
                           <input
                             type="checkbox"
                             checked={t.isCompleted}
-                            onChange={() => handleToggleTask(t.id)}
+                            onChange={() => handleToggleTask(t.id, t.isCompleted)}
                             className="mt-0.5 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
                           />
                           <div className="flex-1 min-w-0">
@@ -484,7 +488,7 @@ export const LeadDetailDrawer: React.FC<LeadDetailDrawerProps> = ({
                         <input
                           type="checkbox"
                           checked={t.isCompleted}
-                          onChange={() => handleToggleTask(t.id)}
+                          onChange={() => handleToggleTask(t.id, t.isCompleted)}
                           className="rounded text-blue-600 cursor-pointer"
                         />
                         <span className="text-xs text-slate-600 line-through flex-1 truncate">

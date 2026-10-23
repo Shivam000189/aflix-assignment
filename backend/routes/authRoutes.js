@@ -33,8 +33,9 @@ router.post('/register', async (req, res) => {
             return res.status(400).json({ success: false, message: 'User with this email already exists' });
         }
 
-        const validRoles = ['admin', 'manager', 'sales_rep'];
-        const userRole = validRoles.includes(role) ? role : 'sales_rep';
+        // All self-registered accounts are strictly given the 'user' role.
+        // Manager, Admin, and team lead accounts are hardcoded and provisioned internally.
+        const userRole = 'user';
 
         const salt = await bcrypt.genSalt(10);
         const hashPassword = await bcrypt.hash(password, salt);
@@ -176,8 +177,15 @@ router.get('/me', authMiddleware, async (req, res) => {
 });
 
 
-router.get('/users', async (req, res) => {
+router.get('/users', authMiddleware, async (req, res) => {
     try {
+        if (!req.user || !['admin', 'manager'].includes(req.user.role)) {
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied: requires administrator or manager privileges'
+            });
+        }
+
         const users = await prisma.user.findMany({
             where: { isActive: true },
             select: {

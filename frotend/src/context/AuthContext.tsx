@@ -1,12 +1,21 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { User } from '../types/crm';
 
+export interface RegisterData {
+  name: string;
+  email: string;
+  password: string;
+  role?: string;
+  phone?: string;
+}
+
 interface AuthContextType {
   user: User | null;
   token: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  register: (data: RegisterData) => Promise<{ success: boolean; error?: string; message?: string }>;
   logout: () => void;
 }
 
@@ -130,6 +139,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const register = async (
+    formData: RegisterData
+  ): Promise<{ success: boolean; error?: string; message?: string }> => {
+    setIsLoading(true);
+    const cleanEmail = formData.email.trim().toLowerCase();
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: formData.name.trim(),
+          email: cleanEmail,
+          password: formData.password,
+          role: formData.role || 'sales_rep',
+          phone: formData.phone ? formData.phone.trim() : '',
+        }),
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setIsLoading(false);
+        return { success: true, message: data.message || 'User registered successfully' };
+      }
+
+      setIsLoading(false);
+      return { success: false, error: data.message || 'Registration failed' };
+    } catch (err) {
+      console.error('Registration request error:', err);
+      setIsLoading(false);
+      return {
+        success: false,
+        error: 'Unable to reach registration server. Please ensure the backend is running.',
+      };
+    }
+  };
+
   const logout = () => {
     setToken(null);
     setUser(null);
@@ -145,6 +192,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated: !!token && !!user,
         isLoading,
         login,
+        register,
         logout,
       }}
     >

@@ -46,13 +46,13 @@ export const Navbar: React.FC<NavbarProps> = ({
 
       <div className="flex items-center gap-3">
         {/* Quick New Lead Button */}
-        <button
+        {/* <button
           onClick={onNewLeadClick}
           className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors"
         >
           <span>+</span>
           <span>New Lead</span>
-        </button>
+        </button> */}
 
         {/* Overdue alert indicator */}
         {overdueCount > 0 && (

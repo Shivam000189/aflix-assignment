@@ -62,14 +62,23 @@ export interface FollowUp {
 }
 
 export type ActivityType =
-  | 'lead_created'
+  | 'status_change'
   | 'status_changed'
-  | 'priority_changed'
+  | 'task_added'
+  | 'task_completed'
+  | 'task_reopened'
+  | 'task_deleted'
+  | 'followup_added'
+  | 'followup_completed'
+  | 'created'
+  | 'lead_created'
+  | 'field_update'
+  | 'owner_change'
   | 'lead_updated'
   | 'lead_archived'
   | 'lead_unarchived'
-  | 'followup_added'
-  | 'followup_completed';
+  | 'note_added'
+  | (string & {});
 
 export interface ActivityLog {
   id: string;
@@ -85,7 +94,7 @@ export interface User {
   id: string;
   name: string;
   email: string;
-  role: 'admin' | 'sales_rep' | 'manager';
+  role: 'admin' | 'manager' | 'user' | 'sales_rep';
   avatarInitials: string;
 }
 
@@ -97,4 +106,64 @@ export interface DashboardStats {
   wonDealsCount: number;
   statusCounts: Record<LeadStatus, number>;
   priorityCounts: Record<LeadPriority, number>;
+}
+
+export interface ImportPreviewRow {
+  rowNumber: number;
+  selected: boolean;
+  status: 'valid' | 'duplicate' | 'invalid';
+  data: {
+    name: string;
+    company: string;
+    email: string;
+    phone: string;
+    source: string;
+    status: LeadStatus;
+    priority: LeadPriority;
+    budget: string;
+    serviceInterested: string;
+    notes: string;
+  };
+  errors: string[];
+  warnings: string[];
+  isDuplicate: boolean;
+  duplicateReasons: string[];
+  duplicateMatches: Array<{
+    id: string;
+    name: string;
+    company: string;
+    owner: string;
+    reason: string;
+  }>;
+}
+
+export interface ImportPreviewResponse {
+  success: boolean;
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  headers: string[];
+  mapping: Record<string, string>;
+  summary: {
+    total: number;
+    valid: number;
+    duplicate: number;
+    invalid: number;
+  };
+  rows: ImportPreviewRow[];
+  warning?: string | null;
+}
+
+export interface ImportSummaryResponse {
+  success: boolean;
+  message: string;
+  summary: {
+    totalProcessed: number;
+    importedCount: number;
+    skippedCount: number;
+    duplicateCount: number;
+    failedCount: number;
+  };
+  importedLeads: Array<{ id: string; name: string; email: string; status: string }>;
+  errors: Array<{ rowNumber: number; leadName: string; reason: string }>;
 }

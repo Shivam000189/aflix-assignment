@@ -67,7 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose, overdueCount 
         ))}
       </div>
 
-      <div className="pt-4 border-t border-slate-200">
+      {/* <div className="pt-4 border-t border-slate-200">
         <div className="px-3 py-2 bg-slate-50 rounded-lg border border-slate-100 text-xs text-slate-500 mb-2">
           <p className="font-medium text-slate-700">Aflix CRM Sandbox</p>
           <p className="text-[11px] text-slate-400 mt-0.5">Seeded with enterprise demo leads</p>
@@ -78,7 +78,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose, overdueCount 
         >
           Reset Demo Data
         </button>
-      </div>
+      </div> */}
     </div>
   );
 

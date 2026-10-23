@@ -49,9 +49,15 @@ When a business talks to potential clients (called **Leads**), it's easy to lose
 ### 5. 🛡️ Smart Duplicate Detection
 - While you type an email or phone number in the "New Lead" form, the system checks in real time and warns you if a duplicate contact already exists.
 
+### 6. 📥 CSV & PDF Lead Import Wizard (Phase 5)
+- **Multi-Format Ingestion**: Upload `.csv` or text-based `.pdf` files up to 5MB and 500 rows.
+- **Smart Column Mapping**: Automatically detects synonymous column headers (e.g. `lead name`, `mobile`, `employer`, `urgency`) with manual drop-down overrides.
+- **Inline Record Editor & Validation**: Review candidate leads, edit names, emails, and phone numbers in-place before committing.
+- **Privacy-Safe Duplicate Alerts**: Flags intra-file duplicate contacts and database duplicates with role-scoped privacy masking (`Confidential Lead` protection for non-managers).
+- **Safe Batch Imports**: Executes imports in bounded ACID transactions (50 records per batch) with idempotency protection.
+- **Exportable Import Summary**: Comprehensive summary showing imported, skipped, and duplicate leads with a downloadable CSV error report for any rejected rows.
 
-
-### 6. 🔒 Secure Authentication
+### 7. 🔒 Secure Authentication
 - JWT (JSON Web Token) based login with encrypted passwords (bcrypt).
 - Quick 1-click demo accounts for easy testing.
 
@@ -67,6 +73,7 @@ When a business talks to potential clients (called **Leads**), it's easy to lose
 | **Backend API** | Node.js, Express 5 | RESTful API with structured routes and controllers |
 | **Database** | PostgreSQL | Industry-standard relational SQL database |
 | **ORM** | Prisma ORM 6 | Type-safe database queries, schema migrations, and relational integrity |
+| **PDF & Stream** | `pdf-parse 2.4.5`, `multer` | Safe in-memory stream decoding and RFC 4180 CSV parsing |
 | **Security** | JWT, bcryptjs, CORS | Password hashing, protected endpoints, and rate limiting |
 
 ---
@@ -135,26 +142,49 @@ cd new-aflix
    npm install
    ```
 
-3. Configure your `.env` file (create `backend/.env` if not present):
-   ```env
-   DATABASE_URL="postgresql://postgres:your_password@localhost:5432/aflix_crm?schema=public"
-   PORT=5000
-   JWT_SECRET=mySuperSecretKey123
-   JWT_EXPIRES_IN=24h
-   ```
-   *(Replace `your_password` with your local PostgreSQL password).*
-
-4. Push the schema to your database:
+3. Configure your `.env` file (copy from `.env.example`):
    ```bash
-   npx prisma db push
+   cp .env.example .env
    ```
+   Configure connection strings:
+   ```env
+   # Pooled connection string for application runtime
+   DATABASE_URL="postgresql://postgres:your_password@localhost:5432/aflix_crm?schema=public"
 
-5. Seed demo leads and test accounts:
+   # Direct unpooled connection string for Prisma migrations & CLI operations
+   DIRECT_URL="postgresql://postgres:your_password@localhost:5432/aflix_crm?schema=public"
+
+   PORT=5000
+   JWT_SECRET="your_strong_jwt_secret"
+   JWT_EXPIRES_IN="24h"
+   ```
+   *(For Neon/cloud PostgreSQL, `DATABASE_URL` uses the pooler endpoint and `DIRECT_URL` uses the direct unpooled connection).*
+
+4. Apply database migrations:
+   - **For a fresh database**:
+     ```bash
+     npx prisma migrate deploy
+     ```
+   - **For an existing database without migration history (Baselining)**:
+     ```bash
+     # 1. Mark baseline migration as applied without re-running DDL
+     npx prisma migrate resolve --applied 0_init
+
+     # 2. Apply role normalization and constraint migration
+     npx prisma migrate deploy
+     ```
+   - **Optional - Migrate legacy accounts via standalone script**:
+     ```bash
+     npm run migrate:roles:dry   # Preview accounts to be migrated
+     npm run migrate:roles       # Apply migration to normalize roles to 'user'
+     ```
+
+5. Seed standardized demo accounts and sample leads:
    ```bash
    npm run seed
    ```
 
-6. Start the backend server:
+6. Start the backend development server:
    ```bash
    npm run dev
    ```
@@ -179,45 +209,207 @@ cd new-aflix
    npm run dev
    ```
 
-4. Open the link shown in your terminal (usually `http://localhost:5173` or `http://localhost:5174`).
+4. Open the link shown in your terminal (usually `http://localhost:5173`).
 
 ---
 
 ## 🔑 Demo Login Accounts
 
-On the login page, you can sign in instantly using any of these pre-seeded accounts:
+You can sign in using any of the standardized demo accounts:
 
-| Name | Role | Email | Password |
-|---|---|---|---|
-| **aflix** | Sales Manager | `aflix@aflix.com` | `password123` |
-| **aflix** | Sales Representative | `alex@aflix.com` | `password123` |
-| **aflix** | Account Executive | `priya@aflix.com` | `password123` |
+| Name | Role | Email | Password | Access Scope |
+|---|---|---|---|---|
+| **Aflix Admin** | `admin` | `admin@aflix.com` | `password123` | Global organization access & user management |
+| **Aflix Manager** | `manager` | `manager@aflix.com` | `password123` | Global pipeline access, reassignment & stats |
+| **Aflix User** | `user` | `user@aflix.com` | `password123` | Strictly user-scoped (sees only assigned leads) |
 
-*(You can also click **Register** to create a brand new account).*
+> **⚠️ Security Notice**: These credentials are strictly for development and demonstration. They must be changed or disabled before deploying to production.
 
 ---
 
-## 🧪 Testing
+## 📥 Phase 5: Production CSV & PDF Lead Import
 
-The backend includes comprehensive test suites testing authentication, duplicate detection, cascading deletes, and pipeline analytics.
+### Overview & Architecture
+The Phase 5 Lead Import engine enables authorized CRM users to ingest batch lead data from CSV spreadsheets and text-based PDF documents without compromising database integrity, role boundaries, or system performance.
 
-To run the unit tests:
-```bash
-cd backend
-npm run test:unit
+```text
+Uploaded File (.csv / .pdf)
+         │
+         ▼
+[ In-Memory Multer Stream (Max 5MB) ]
+         │
+         ▼
+[ Safe Parser Engine (leadParserService.js) ]
+  ├── RFC 4180 CSV Parser (Quotes, UTF-8 BOM, Multiline cells)
+  ├── PDF Stream Decoder (pdf-parse 2.4.5)
+  ├── Alphanumeric OCR Scanned PDF Detector
+  ├── Smart Column Alias Resolver
+  └── CSV Formula Injection Sanitizer
+         │
+         ▼
+[ Validation & Duplicate Scoping ]
+  ├── Required Field Validation (name, email/phone format)
+  ├── Intra-File Duplicate Detection
+  └── DB Duplicate Detection with Privacy Masking (Confidential Lead)
+         │
+         ▼
+[ Preview & Manual Mapping / Inline Editing (LeadImportModal.tsx) ]
+         │
+         ▼
+[ Bounded ACID Batch Transaction (Max 50/chunk) ]
+  ├── Role Assignment Enforcement (user forced to self)
+  ├── Idempotent Duplicate Skipping
+  └── ActivityLog Audit Trail ('imported')
 ```
 
-To run the full API integration tests:
+### Supported Formats & Capabilities
+
+#### 1. CSV Support (RFC 4180 Compliant)
+- **Delimiters & Quotes**: Fully supports commas inside quotes (e.g., `"Acme, Inc."`), escaped quotes (`""`), and multiline cell content.
+- **Encoding**: UTF-8 and UTF-8 with Byte Order Mark (`\uFEFF`) are automatically normalized and stripped.
+- **Whitespace & Blank Rows**: Tolerates leading/trailing whitespace, trailing empty lines, and carriage returns (`\r\n`).
+- **Formula Injection Defense**: All values prefixed with spreadsheet formula triggers (`=`, `+`, `-`, `@`, `\t`, `\r`) are sanitized with a leading apostrophe before storage or export.
+
+#### 2. Text-Based PDF Support
+- **Extraction Mechanism**: Uses `pdf-parse` (v2.4.5) running entirely in Node.js memory. No data is ever sent to external AI APIs or third-party cloud services.
+- **Layouts Supported**:
+  - Tab-separated or tokenized contact tables.
+  - Label-value pairs (e.g., `Name: John Doe`, `Email: john@acme.com`, `Phone: 9876543210`).
+  - Section-based contact cards.
+- **Scanned / Image-Only Detection**: Scanned or rasterized PDFs lacking a text layer (< 30 alphanumeric characters) are detected immediately and return a descriptive `400 Bad Request` informing the user that OCR preprocessing or a text-based PDF is required.
+
+### Column Mapping & Field Aliases
+The import engine automatically resolves header synonyms to standard CRM Lead fields:
+
+| CRM Lead Field | Recognized Aliases | Required |
+|---|---|:---:|
+| `name` | `name`, `full_name`, `lead name`, `client name`, `contact name`, `customer name`, `lead_name` | Yes |
+| `email` | `email`, `email address`, `email_address`, `mail`, `contact email` | No* |
+| `phone` | `phone`, `phone number`, `mobile`, `cell`, `contact number`, `tel` | No* |
+| `company` | `company`, `company name`, `organization`, `business`, `employer` | No |
+| `status` | `status`, `stage`, `pipeline stage`, `sales stage` | No (Defaults to `New`) |
+| `priority` | `priority`, `urgency`, `importance` | No (Defaults to `Medium`) |
+| `source` | `source`, `lead source`, `channel`, `origin` | No (Defaults to `Website`) |
+| `budget` | `budget`, `deal value`, `amount`, `contract value` | No |
+| `serviceInterested`| `service`, `services`, `service interested`, `requirement` | No |
+| `notes` | `notes`, `note`, `description`, `comments`, `remarks` | No |
+
+*\* Note: Valid leads require either a valid email or phone number.*
+
+### Security, Privacy & Authorization Guardrails
+
+1. **Fail-Closed Role-Based Ownership**:
+   - Standard `user` role cannot assign leads to other team members or tamper with `createdById`. Any `assignedToId` or `owner` provided in the payload is ignored and forced to `req.user.userId` and `req.user.name`.
+   - `manager` and `admin` roles can assign imported leads to arbitrary active CRM users.
+2. **Privacy-Preserving Duplicate Detection**:
+   - When a candidate lead matches an existing record in the database that the authenticated user does not have permission to view, the match is reported as a duplicate warning, but the existing lead's name and company are redacted to `Confidential Lead` to prevent tenant reconnaissance.
+3. **Bounded Batch Transactions & Safe Memory Usage**:
+   - Maximum upload size: **5 MB**.
+   - Maximum record limit: **500 rows** per file.
+   - Batching: Processed in isolated ACID transactions of **50 records per chunk** using Prisma `$transaction` (`withTransaction` helper), preventing memory exhaustion or long-held database locks.
+4. **Audit Trail**:
+   - Creates canonical `ActivityLog` records with `type: 'imported'` and detailed metadata for every ingested lead.
+
+### API Endpoints
+
+#### 1. Preview Import File
+- **Endpoint**: `POST /api/leads/import/preview`
+- **Auth**: Bearer JWT (`admin`, `manager`, `user`)
+- **Content-Type**: `multipart/form-data` (Field: `file`)
+- **Query Params**: `type=csv|pdf` (optional)
+
+#### 2. Confirm Batch Import
+- **Endpoint**: `POST /api/leads/import`
+- **Auth**: Bearer JWT (`admin`, `manager`, `user`)
+- **Content-Type**: `application/json`
+- **Payload**: `{ leads: [...], skipDuplicates: boolean }`
+
+---
+
+## 🧪 Testing Suites & Verification
+
+The project includes five comprehensive automated test suites verifying every layer of the application:
+
 ```bash
 cd backend
+
+# 1. Full API integration & security regression tests (Tasks 1-8: Auth, RBAC, IDOR, Cascades)
 npm test
+
+# 2. Unit & database model tests (Phone normalization, duplicate detection, pagination)
+npm run test:unit
+
+# 3. Phase 3 verification (Timezone-safe dates, canonical activity mapping, Express 5 static serving)
+npm run test:phase3
+
+# 4. Phase 4 comprehensive end-to-end criteria (All 15 assessment criteria with isolated records)
+npm run test:phase4
+
+# 5. Phase 5 Lead Import verification (All 14 CSV/PDF parsing, RBAC, duplicate & audit criteria)
+npm run test:phase5
+
+# 6. Run all test suites sequentially
+npm run test:all
 ```
 
-To build and check frontend types:
+To build and check frontend types and production bundling:
 ```bash
 cd frotend
 npm run build
 ```
+
+---
+
+## 🎬 3–5 Minute Evaluation Demonstration Script
+
+Follow this step-by-step walkthrough to verify all core assessment criteria:
+
+### Step 1: Sign in as Standard User (1 min)
+1. Open the login page (`http://localhost:5173/login`).
+2. Notice the **Demo Quick Fill** panel (available in dev mode). Click **User** to populate `user@aflix.com` and `password123`.
+3. Click **Sign In**.
+4. Observe the **Dashboard**: KPIs (Total Active, High Priority, Overdue Follow-ups) and the **Urgent Action Agenda** are strictly filtered to this user's assigned leads.
+
+### Step 2: Create a Lead & Verify Duplicate Detection (1 min)
+1. Navigate to **Leads** and click **+ Add Lead**.
+2. Type an existing contact's email or phone (e.g., `sophia.laurent@aurafintech.com`).
+3. Notice the **Duplicate Lead Alert** banner instantly appear displaying the matching contact and reason.
+4. Fill in unique lead details (e.g., `Quantum Robotics`, Budget: `₹5,00,000 - ₹15,00,000`) and submit.
+5. The lead appears in the table with formatted INR budget and status badge.
+
+### Step 3: Phase 5 Lead Import Wizard (1.5 min)
+1. On the **Leads** page, click the **Import Leads** button in the header.
+2. **Step 1 (Upload)**: Drag and drop or browse to select a `.csv` or text-based `.pdf` file. Notice the file type, file size, and upload progress bar.
+3. **Step 2 (Preview & Mapping)**:
+   - For CSVs with custom headers, review the **Column Mapping** panel and re-map fields if necessary.
+   - Inspect the **Preview Table**: observe row-level validation badges (`Valid`, `Duplicate`, `Invalid`).
+   - Check the inline editor: click any field to tweak contact details before importing.
+   - Use the row checkboxes or table header checkbox to select which rows to import.
+4. **Step 3 (Import & Confirmation)**:
+   - Click **Import X Selected Leads**.
+   - Notice the animated progress bar as records are sent to the backend.
+   - View the final **Summary Card**: counts for Imported, Skipped, Duplicates, and Failed.
+   - Click **Download Error Report** to export a clean CSV of skipped or failed records.
+   - Click **Done**: the Leads table immediately refreshes with the newly imported records.
+
+### Step 4: Follow-Up Scheduling & Activity History (1 min)
+1. Click on any imported lead to open the **Slide-Over Drawer**.
+2. Switch to the **Audit Trail & History** tab: verify the canonical `imported` activity log entry exists with timestamp and creator details.
+3. Switch to the **Follow-ups** tab and click **Schedule Task**.
+4. Select **Call**, set the due date to yesterday (to test overdue indicator) or today, and save.
+5. Toggle the task as **Completed**.
+6. Observe the chronological timeline updated with `task_added` and `task_completed` events.
+
+### Step 5: Pipeline Kanban & Stage Progression (30 sec)
+1. Navigate to **Pipeline Board**.
+2. Locate the lead in the **New** column and advance it to **Qualified**.
+3. Re-open the lead drawer: verify the `status_change` audit log records the stage transition.
+
+### Step 6: Authorization Security & Organization-Wide Views (1 min)
+1. Attempt to reassign lead ownership or access an unauthorized lead ID: observe that standard users cannot alter ownership.
+2. Sign out and click **Manager** (`manager@aflix.com`).
+3. Observe that the Manager dashboard and pipeline display **organization-wide deals**, allowing global reassignment and performance tracking.
+4. Sign in as **Admin** (`admin@aflix.com`) to manage team users and perform administrative cascade deletions.
 
 ---
 
@@ -228,12 +420,19 @@ npm run build
 | **Start Backend** | `npm run dev` | `backend/` |
 | **Start Frontend** | `npm run dev` | `frotend/` |
 | **Build Frontend** | `npm run build` | `frotend/` |
-| **Reseed Demo Leads** | `node seed-demo.js` | `backend/` |
-| **Run API Tests** | `node test-api.js` | `backend/` |
-| **Run Unit Tests** | `node test-leads.js` | `backend/` |
-| **Update DB Schema** | `npx prisma db push` | `backend/` |
+| **Run All Tests** | `npm run test:all` | `backend/` |
+| **Run Phase 5 Import Tests** | `npm run test:phase5` | `backend/` |
+| **Run API & Security Suite** | `npm test` | `backend/` |
+| **Run Unit Tests** | `npm run test:unit` | `backend/` |
+| **Run Phase 3 Tests** | `npm run test:phase3` | `backend/` |
+| **Run Phase 4 E2E Suite** | `npm run test:phase4` | `backend/` |
+| **Prisma Schema Validate** | `npm run prisma:validate` | `backend/` |
+| **Check Migration Status** | `npm run prisma:status` | `backend/` |
+| **Apply Migrations** | `npm run prisma:migrate` | `backend/` |
+| **Seed Demo Accounts** | `npm run seed` | `backend/` |
 
 ---
 
 ## 📄 License
 This project is proprietary and maintained for **Aflix Infotech**.
+

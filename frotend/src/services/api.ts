@@ -5,6 +5,8 @@ import type {
   DashboardStats,
   LeadStatus,
   LeadPriority,
+  ImportPreviewResponse,
+  ImportSummaryResponse,
 } from '../types/crm';
 
 const TOKEN_KEY = 'aflix_crm_token';
@@ -27,18 +29,89 @@ function getAuthHeaders(): HeadersInit {
   return headers;
 }
 
-// Check if a date string YYYY-MM-DD is overdue
-export function isOverdue(dueDateStr: string, isCompleted: boolean): boolean {
-  if (isCompleted || !dueDateStr) return false;
-  const today = new Date().toISOString().split('T')[0];
-  const dateOnly = dueDateStr.includes('T') ? dueDateStr.split('T')[0] : dueDateStr;
+/**
+ * Returns today's calendar date in the client's local timezone as 'YYYY-MM-DD'.
+ */
+export function getLocalTodayDateString(referenceDate: Date = new Date()): string {
+  const year = referenceDate.getFullYear();
+  const month = String(referenceDate.getMonth() + 1).padStart(2, '0');
+  const day = String(referenceDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Normalizes an arbitrary date input into a local calendar 'YYYY-MM-DD' string.
+ * - Extracts date portion from 'YYYY-MM-DD' or 'YYYY-MM-DDT...'
+ * - Normalizes Date objects using local year/month/day
+ * - Returns empty string for invalid, missing, or malformed inputs
+ */
+export function normalizeDateString(dateInput?: string | Date | number | null): string {
+  if (!dateInput && dateInput !== 0) return '';
+
+  if (typeof dateInput === 'string') {
+    const trimmed = dateInput.trim();
+    if (!trimmed) return '';
+
+    // Match ISO/calendar YYYY-MM-DD pattern
+    const match = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (match) {
+      const year = match[1];
+      const month = match[2].padStart(2, '0');
+      const day = match[3].padStart(2, '0');
+      const mNum = parseInt(month, 10);
+      const dNum = parseInt(day, 10);
+      if (mNum >= 1 && mNum <= 12 && dNum >= 1 && dNum <= 31) {
+        return `${year}-${month}-${day}`;
+      }
+    }
+
+    const parsed = new Date(trimmed);
+    if (isNaN(parsed.getTime())) return '';
+    return getLocalTodayDateString(parsed);
+  }
+
+  if (dateInput instanceof Date) {
+    if (isNaN(dateInput.getTime())) return '';
+    return getLocalTodayDateString(dateInput);
+  }
+
+  if (typeof dateInput === 'number') {
+    const parsed = new Date(dateInput);
+    if (isNaN(parsed.getTime())) return '';
+    return getLocalTodayDateString(parsed);
+  }
+
+  return '';
+}
+
+/**
+ * Checks if a task due date is overdue in the client's local timezone.
+ * Completed tasks and invalid/empty dates are never marked overdue.
+ */
+export function isOverdue(
+  dueDateInput?: string | Date | null,
+  isCompleted: boolean = false,
+  referenceDate: Date = new Date()
+): boolean {
+  if (isCompleted) return false;
+  const dateOnly = normalizeDateString(dueDateInput);
+  if (!dateOnly) return false;
+
+  const today = getLocalTodayDateString(referenceDate);
   return dateOnly < today;
 }
 
-export function isDueToday(dueDateStr: string): boolean {
-  if (!dueDateStr) return false;
-  const today = new Date().toISOString().split('T')[0];
-  const dateOnly = dueDateStr.includes('T') ? dueDateStr.split('T')[0] : dueDateStr;
+/**
+ * Checks if a task is due today in the client's local timezone.
+ */
+export function isDueToday(
+  dueDateInput?: string | Date | null,
+  referenceDate: Date = new Date()
+): boolean {
+  const dateOnly = normalizeDateString(dueDateInput);
+  if (!dateOnly) return false;
+
+  const today = getLocalTodayDateString(referenceDate);
   return dateOnly === today;
 }
 
@@ -93,12 +166,7 @@ function formatLeadFromApi(raw: any): Lead {
 }
 
 function formatTaskFromApi(raw: any): FollowUp {
-  let dueDateStr = '';
-  if (raw.dueDate) {
-    dueDateStr = typeof raw.dueDate === 'string'
-      ? (raw.dueDate.includes('T') ? raw.dueDate.split('T')[0] : raw.dueDate)
-      : new Date(raw.dueDate).toISOString().split('T')[0];
-  }
+  const dueDateStr = normalizeDateString(raw.dueDate);
   return {
     id: raw.id || raw._id,
     leadId: raw.leadId || raw.lead?.id || raw.lead?._id || '',
@@ -348,18 +416,35 @@ export const crmApi = {
     return formatTaskFromApi(data.task);
   },
 
-  async toggleFollowUp(id: string, currentUser = 'You'): Promise<FollowUp> {
-    const all = await this.getFollowUps();
-    const existing = all.find((t) => t.id === id);
-    if (!existing) {
-      throw new Error('Follow-up task not found');
+  async toggleFollowUp(
+    id: string,
+    leadId?: string,
+    isCompleted?: boolean,
+    currentUser = 'You'
+  ): Promise<FollowUp> {
+    let resolvedLeadId = leadId;
+    let targetCompleted = isCompleted;
+
+    if (!resolvedLeadId || targetCompleted === undefined) {
+      const all = await this.getFollowUps();
+      const existing = all.find((t) => t.id === id);
+      if (existing) {
+        resolvedLeadId = resolvedLeadId || existing.leadId;
+        if (targetCompleted === undefined) {
+          targetCompleted = !existing.isCompleted;
+        }
+      }
     }
 
-    const res = await fetch(`${API_BASE_URL}/leads/${existing.leadId}/tasks/${id}`, {
+    const endpoint = resolvedLeadId
+      ? `${API_BASE_URL}/leads/${resolvedLeadId}/tasks/${id}`
+      : `${API_BASE_URL}/leads/tasks/${id}`;
+
+    const res = await fetch(endpoint, {
       method: 'PATCH',
       headers: getAuthHeaders(),
       body: JSON.stringify({
-        isCompleted: !existing.isCompleted,
+        isCompleted: targetCompleted !== undefined ? targetCompleted : true,
         assignedTo: currentUser,
       }),
     });
@@ -467,6 +552,54 @@ export const crmApi = {
         Urgent: s.byPriority?.Urgent ?? 0,
       },
     };
+  },
+
+  // --- LEAD IMPORT (CSV & PDF) ---
+  async previewImportLeads(file: File, customMapping?: Record<string, string>): Promise<ImportPreviewResponse> {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const formData = new FormData();
+    formData.append('file', file);
+    if (customMapping) {
+      formData.append('mapping', JSON.stringify(customMapping));
+    }
+
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/leads/import/preview`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to preview file');
+    }
+    return data;
+  },
+
+  async confirmImportLeads(
+    leads: any[],
+    options?: {
+      skipDuplicates?: boolean;
+      allowDuplicates?: boolean;
+      defaultStatus?: string;
+      defaultPriority?: string;
+      defaultSource?: string;
+    }
+  ): Promise<ImportSummaryResponse> {
+    const res = await fetch(`${API_BASE_URL}/leads/import`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ leads, options }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || 'Failed to import leads');
+    }
+    return data;
   },
 
   // Reset demo data helper

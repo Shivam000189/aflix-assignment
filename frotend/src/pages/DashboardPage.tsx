@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useOutletContext, useNavigate } from 'react-router-dom';
-import { crmApi, isOverdue } from '../services/api';
+import { crmApi, isOverdue, isDueToday } from '../services/api';
 import type { DashboardStats, FollowUp, ActivityLog, LeadStatus } from '../types/crm';
 import { PipelineChart } from '../components/dashboard/PipelineChart';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
@@ -35,8 +35,11 @@ export const DashboardPage: React.FC = () => {
 
       setStats(dashStats);
       // Filter tasks that are overdue or due today
-      const today = new Date().toISOString().split('T')[0];
-      const urgent = allTasks.filter((t) => t.dueDate <= today).slice(0, 5);
+      const urgent = allTasks
+        .filter(
+          (t) => !t.isCompleted && (isOverdue(t.dueDate, t.isCompleted) || isDueToday(t.dueDate))
+        )
+        .slice(0, 5);
       setUrgentTasks(urgent);
       setRecentActivities(activities.slice(0, 6));
     } catch (e) {

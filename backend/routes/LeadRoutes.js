@@ -2,11 +2,42 @@ const express = require('express');
 const router = express.Router();
 const { prisma } = require('../config/db');
 const { withTransaction } = require('../utils/transaction');
+const importRoutes = require('./leadImportRoutes');
+
+// Mount CSV & PDF Lead Import routes
+router.use('/import', importRoutes);
 
 // Helper to normalize phone numbers (digits only)
 const normalizePhone = (phone) => {
     if (!phone) return '';
     return String(phone).replace(/\D/g, '');
+};
+
+// Helper to check whether a role grants global administrative or managerial access
+const isGlobalRole = (role) => {
+    return typeof role === 'string' && (role === 'admin' || role === 'manager');
+};
+
+// Helper to enforce role-based lead data scoping.
+// Fail-closed role policy:
+// - 'admin' and 'manager': organization-wide access (returns null)
+// - 'user', legacy roles ('sales_rep'), unknown/missing/malformed roles: user-scoped access
+const getUserScopeFilter = (req) => {
+    if (!req.user || !isGlobalRole(req.user.role)) {
+        const userId = req.user?.userId || 'unauthenticated';
+        const userName = req.user?.name;
+        const userEmail = req.user?.email;
+
+        return {
+            OR: [
+                { assignedToId: userId },
+                { createdById: userId },
+                ...(userName ? [{ owner: { equals: userName, mode: 'insensitive' } }] : []),
+                ...(userEmail ? [{ owner: { equals: userEmail, mode: 'insensitive' } }] : [])
+            ]
+        };
+    }
+    return null; // Admin and Manager roles see all leads
 };
 
 // Formatting helpers to ensure backward compatibility with frontend and API consumers
@@ -39,10 +70,7 @@ const formatLead = (lead) => {
     };
 };
 
-/**
- * Check for duplicate leads by email or phone
- * Returns { isDuplicate: boolean, reasons: string[], matches: Lead[] }
- */
+
 const findDuplicates = async ({ email, phone, excludeId = null }) => {
     const conditions = [];
     const normalizedEmail = email ? String(email).trim().toLowerCase() : '';
@@ -126,54 +154,99 @@ router.get('/check-duplicate', async (req, res) => {
 router.get('/stats', async (req, res) => {
     try {
         const now = new Date();
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-        const [
-            total,
-            active,
-            archived,
-            duplicates,
-            highPriority,
-            rawStatusGroups,
-            rawPriorityGroups,
-            rawSourceGroups,
-            overdueTasks,
-            upcomingTasks
-        ] = await Promise.all([
-            prisma.lead.count(),
-            prisma.lead.count({ where: { isArchived: false } }),
-            prisma.lead.count({ where: { isArchived: true } }),
-            prisma.lead.count({ where: { isDuplicate: true } }),
-            prisma.lead.count({ where: { isArchived: false, priority: { in: ['High', 'Urgent'] } } }),
+        const userScope = getUserScopeFilter(req);
+
+        let leadCounts, followUpCounts;
+
+        if (userScope) {
+            const userId = req.user.userId;
+            const userName = req.user.name || '';
+            const userEmail = req.user.email || '';
+
+            const [scopedLeads] = await prisma.$queryRaw`
+                SELECT 
+                    COUNT(*)::int AS "total",
+                    COUNT(*) FILTER (WHERE "isArchived" = false)::int AS "active",
+                    COUNT(*) FILTER (WHERE "isArchived" = true)::int AS "archived",
+                    COUNT(*) FILTER (WHERE "isDuplicate" = true)::int AS "duplicates",
+                    COUNT(*) FILTER (WHERE "isArchived" = false AND "priority" IN ('High', 'Urgent'))::int AS "highPriority"
+                FROM "leads"
+                WHERE "assignedToId" = ${userId} 
+                   OR "createdById" = ${userId}
+                   OR LOWER("owner") = LOWER(${userName})
+                   OR LOWER("owner") = LOWER(${userEmail});
+            `;
+            leadCounts = scopedLeads;
+
+            const [scopedFollowUps] = await prisma.$queryRaw`
+                SELECT
+                    COUNT(*) FILTER (WHERE f."dueDate" < ${startOfToday})::int AS "overdueTasks",
+                    COUNT(*) FILTER (WHERE f."dueDate" >= ${startOfToday})::int AS "upcomingTasks"
+                FROM "follow_ups" f
+                JOIN "leads" l ON f."leadId" = l.id
+                WHERE f."isCompleted" = false 
+                  AND l."isArchived" = false
+                  AND (l."assignedToId" = ${userId} 
+                       OR l."createdById" = ${userId}
+                       OR LOWER(l."owner") = LOWER(${userName})
+                       OR LOWER(l."owner") = LOWER(${userEmail}));
+            `;
+            followUpCounts = scopedFollowUps;
+        } else {
+            const [allLeads] = await prisma.$queryRaw`
+                SELECT 
+                    COUNT(*)::int AS "total",
+                    COUNT(*) FILTER (WHERE "isArchived" = false)::int AS "active",
+                    COUNT(*) FILTER (WHERE "isArchived" = true)::int AS "archived",
+                    COUNT(*) FILTER (WHERE "isDuplicate" = true)::int AS "duplicates",
+                    COUNT(*) FILTER (WHERE "isArchived" = false AND "priority" IN ('High', 'Urgent'))::int AS "highPriority"
+                FROM "leads";
+            `;
+            leadCounts = allLeads;
+
+            const [allFollowUps] = await prisma.$queryRaw`
+                SELECT
+                    COUNT(*) FILTER (WHERE f."dueDate" < ${startOfToday})::int AS "overdueTasks",
+                    COUNT(*) FILTER (WHERE f."dueDate" >= ${startOfToday})::int AS "upcomingTasks"
+                FROM "follow_ups" f
+                JOIN "leads" l ON f."leadId" = l.id
+                WHERE f."isCompleted" = false AND l."isArchived" = false;
+            `;
+            followUpCounts = allFollowUps;
+        }
+
+        const groupWhere = {
+            isArchived: false,
+            ...(userScope ? userScope : {})
+        };
+
+        const [rawStatusGroups, rawPriorityGroups, rawSourceGroups] = await Promise.all([
             prisma.lead.groupBy({
                 by: ['status'],
-                where: { isArchived: false },
+                where: groupWhere,
                 _count: { id: true }
             }),
             prisma.lead.groupBy({
                 by: ['priority'],
-                where: { isArchived: false },
+                where: groupWhere,
                 _count: { id: true }
             }),
             prisma.lead.groupBy({
                 by: ['source'],
-                where: { isArchived: false },
+                where: groupWhere,
                 _count: { id: true }
-            }),
-            prisma.followUp.count({
-                where: {
-                    isCompleted: false,
-                    dueDate: { lt: now },
-                    lead: { isArchived: false }
-                }
-            }),
-            prisma.followUp.count({
-                where: {
-                    isCompleted: false,
-                    dueDate: { gte: now },
-                    lead: { isArchived: false }
-                }
             })
         ]);
+
+        const total = leadCounts?.total || 0;
+        const active = leadCounts?.active || 0;
+        const archived = leadCounts?.archived || 0;
+        const duplicates = leadCounts?.duplicates || 0;
+        const highPriority = leadCounts?.highPriority || 0;
+        const overdueTasks = followUpCounts?.overdueTasks || 0;
+        const upcomingTasks = followUpCounts?.upcomingTasks || 0;
 
         const rawMap = {};
         rawStatusGroups.forEach(g => {
@@ -230,10 +303,15 @@ router.get('/stats', async (req, res) => {
 router.get('/pipeline', async (req, res) => {
     try {
         const now = new Date();
+        const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const STAGES = ['New', 'Contacted', 'Qualified', 'Proposal', 'Won', 'Lost'];
 
+        const userScope = getUserScopeFilter(req);
         const leads = await prisma.lead.findMany({
-            where: { isArchived: false },
+            where: {
+                isArchived: false,
+                ...(userScope ? userScope : {})
+            },
             include: {
                 followUps: {
                     orderBy: { dueDate: 'asc' }
@@ -292,8 +370,8 @@ router.get('/pipeline', async (req, res) => {
         leads.forEach(rawLead => {
             const lead = formatLead(rawLead);
             const pendingTasks = (lead.tasks || []).filter(t => !t.isCompleted);
-            const overdueTasks = pendingTasks.filter(t => new Date(t.dueDate) < now);
-            const upcomingTasks = pendingTasks.filter(t => new Date(t.dueDate) >= now);
+            const overdueTasks = pendingTasks.filter(t => new Date(t.dueDate) < startOfToday);
+            const upcomingTasks = pendingTasks.filter(t => new Date(t.dueDate) >= startOfToday);
 
             if (overdueTasks.length > 0) overdueTasksCount += overdueTasks.length;
             if (lead.priority === 'High' || lead.priority === 'Urgent') highPriorityCount++;
@@ -374,17 +452,23 @@ router.patch('/:id/stage', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Pipeline stage is required' });
         }
 
-        const updatedLead = await withTransaction(async (tx) => {
-            const existing = await tx.lead.findUnique({
-                where: { id: req.params.id },
-                include: { followUps: true, activityLogs: true }
-            });
-
-            if (!existing) {
-                return null;
+        const userScope = getUserScopeFilter(req);
+        const result = await withTransaction(async (tx) => {
+            const leadExists = await tx.lead.findUnique({ where: { id: req.params.id } });
+            if (!leadExists) {
+                return { status: 404, message: 'Lead not found' };
             }
 
-            const prevStage = existing.status;
+            if (userScope) {
+                const accessible = await tx.lead.findFirst({
+                    where: { id: req.params.id, ...userScope }
+                });
+                if (!accessible) {
+                    return { status: 403, message: 'Access denied: you do not have permission to modify this lead stage' };
+                }
+            }
+
+            const prevStage = leadExists.status;
 
             // 1. Update lead stage
             const lead = await tx.lead.update({
@@ -393,7 +477,7 @@ router.patch('/:id/stage', async (req, res) => {
             });
 
             // 2. Insert audit activity log inside same transaction
-            const activityEntry = await tx.activityLog.create({
+            await tx.activityLog.create({
                 data: {
                     leadId: lead.id,
                     type: 'status_change',
@@ -401,7 +485,8 @@ router.patch('/:id/stage', async (req, res) => {
                     fieldName: 'status',
                     oldValue: prevStage,
                     newValue: stage,
-                    performedByName: updatedBy || 'Agent',
+                    performedByName: updatedBy || req.user?.name || 'Agent',
+                    performedById: req.user?.userId || null,
                     timestamp: new Date()
                 }
             });
@@ -415,17 +500,20 @@ router.patch('/:id/stage', async (req, res) => {
                 }
             });
 
-            return fullLead;
+            return { status: 200, lead: fullLead };
         });
 
-        if (!updatedLead) {
-            return res.status(404).json({ success: false, message: 'Lead not found' });
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
         }
 
         res.status(200).json({
             success: true,
             message: `Lead moved to ${stage}`,
-            lead: formatLead(updatedLead)
+            lead: formatLead(result.lead)
         });
     } catch (err) {
         console.error('Error updating lead stage:', err.message);
@@ -482,6 +570,15 @@ const createLeadHandler = async (req, res) => {
         const normalizedEmail = email ? String(email).trim().toLowerCase() : '';
         const normPhone = phone ? normalizePhone(phone) : '';
 
+        const isPrivileged = req.user && isGlobalRole(req.user.role);
+        const effectiveAssignedToId = isPrivileged
+            ? (assignedToId || null)
+            : req.user.userId;
+        const effectiveCreatedById = req.user ? req.user.userId : (createdById || null);
+        const effectiveOwner = isPrivileged
+            ? (owner || 'Unassigned')
+            : (req.user.name || req.user.email || 'User');
+
         // Execute creation inside PostgreSQL ACID transaction
         const createdLead = await withTransaction(async (tx) => {
             const lead = await tx.lead.create({
@@ -496,13 +593,13 @@ const createLeadHandler = async (req, res) => {
                     budget: budget || '₹1,00,000 - ₹5,00,000',
                     status: status || 'New',
                     priority: priority || 'Medium',
-                    owner: owner || 'Unassigned',
+                    owner: effectiveOwner,
                     notes: notes ? String(notes).trim() : '',
                     isDuplicate: isDup,
                     duplicateReasons: dupReasons,
                     duplicateMatches: dupMatches,
-                    assignedToId: assignedToId || null,
-                    createdById: createdById || null
+                    assignedToId: effectiveAssignedToId,
+                    createdById: effectiveCreatedById
                 }
             });
 
@@ -512,7 +609,7 @@ const createLeadHandler = async (req, res) => {
                     leadId: lead.id,
                     type: 'created',
                     description: `Lead created for ${lead.name}${lead.company ? ` from ${lead.company}` : ''}`,
-                    performedByName: owner || 'System'
+                    performedByName: effectiveOwner || 'System'
                 }
             });
 
@@ -599,6 +696,12 @@ const getLeadsHandler = async (req, res) => {
         const skip = (pageNum - 1) * limitNum;
 
         const andConditions = [];
+
+        // Role-based data scoping for regular users
+        const userScope = getUserScopeFilter(req);
+        if (userScope) {
+            andConditions.push(userScope);
+        }
 
         // Archiving filter
         if (archived === 'true') {
@@ -711,7 +814,9 @@ router.get('/follow-ups/overview', async (req, res) => {
         const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
+        const userScope = getUserScopeFilter(req);
         const allTasks = await prisma.followUp.findMany({
+            where: userScope ? { lead: userScope } : {},
             include: {
                 lead: {
                     select: {
@@ -802,6 +907,24 @@ router.get('/follow-ups/overview', async (req, res) => {
 // -------------------------------------------------------------
 router.get('/:id', async (req, res) => {
     try {
+        const userScope = getUserScopeFilter(req);
+        const leadExists = await prisma.lead.findUnique({ where: { id: req.params.id } });
+        if (!leadExists) {
+            return res.status(404).json({ success: false, message: 'Lead not found' });
+        }
+
+        if (userScope) {
+            const accessible = await prisma.lead.findFirst({
+                where: {
+                    id: req.params.id,
+                    ...userScope
+                }
+            });
+            if (!accessible) {
+                return res.status(403).json({ success: false, message: 'Access denied: you do not have permission to view this lead' });
+            }
+        }
+
         const lead = await prisma.lead.findUnique({
             where: { id: req.params.id },
             include: {
@@ -809,10 +932,6 @@ router.get('/:id', async (req, res) => {
                 activityLogs: { orderBy: { timestamp: 'desc' } }
             }
         });
-
-        if (!lead) {
-            return res.status(404).json({ success: false, message: 'Lead not found' });
-        }
 
         res.status(200).json({
             success: true,
@@ -844,26 +963,52 @@ const updateLeadHandler = async (req, res) => {
             assignedToId
         } = req.body;
 
-        const updatedLead = await withTransaction(async (tx) => {
-            const existing = await tx.lead.findUnique({
-                where: { id: req.params.id },
-                include: { followUps: true, activityLogs: true }
+        const userScope = getUserScopeFilter(req);
+        const isPrivileged = req.user && isGlobalRole(req.user.role);
+
+        const result = await withTransaction(async (tx) => {
+            const leadExists = await tx.lead.findUnique({
+                where: { id: req.params.id }
             });
 
-            if (!existing) {
-                return null;
+            if (!leadExists) {
+                return { status: 404, message: 'Lead not found' };
+            }
+
+            if (userScope) {
+                const accessible = await tx.lead.findFirst({
+                    where: {
+                        id: req.params.id,
+                        ...userScope
+                    }
+                });
+                if (!accessible) {
+                    return { status: 403, message: 'Access denied: you do not have permission to modify this lead' };
+                }
+            }
+
+            // Task 4: Standard users must not change owner, assignedToId, or createdById
+            if (!isPrivileged) {
+                if ((owner !== undefined && owner !== leadExists.owner) ||
+                    (assignedToId !== undefined && assignedToId !== leadExists.assignedToId) ||
+                    (req.body.createdById !== undefined && req.body.createdById !== leadExists.createdById)) {
+                    return {
+                        status: 403,
+                        message: 'Access denied: only administrators and managers can reassign lead owners or assignees'
+                    };
+                }
             }
 
             const updates = {};
             const activityEntries = [];
 
             if (name !== undefined && name.trim()) {
-                if (existing.name !== name.trim()) {
+                if (leadExists.name !== name.trim()) {
                     activityEntries.push({
                         type: 'field_update',
-                        description: `Lead name updated from '${existing.name}' to '${name.trim()}'`,
+                        description: `Lead name updated from '${leadExists.name}' to '${name.trim()}'`,
                         fieldName: 'name',
-                        oldValue: existing.name,
+                        oldValue: leadExists.name,
                         newValue: name.trim()
                     });
                 }
@@ -871,12 +1016,12 @@ const updateLeadHandler = async (req, res) => {
             }
 
             if (company !== undefined) {
-                if (existing.company !== company.trim()) {
+                if (leadExists.company !== company.trim()) {
                     activityEntries.push({
                         type: 'field_update',
                         description: `Company updated to '${company.trim()}'`,
                         fieldName: 'company',
-                        oldValue: existing.company,
+                        oldValue: leadExists.company,
                         newValue: company.trim()
                     });
                 }
@@ -885,12 +1030,12 @@ const updateLeadHandler = async (req, res) => {
 
             if (email !== undefined) {
                 const normEmail = String(email).trim().toLowerCase();
-                if (existing.email !== normEmail) {
+                if (leadExists.email !== normEmail) {
                     activityEntries.push({
                         type: 'field_update',
                         description: `Email updated to '${normEmail}'`,
                         fieldName: 'email',
-                        oldValue: existing.email,
+                        oldValue: leadExists.email,
                         newValue: normEmail
                     });
                 }
@@ -903,34 +1048,34 @@ const updateLeadHandler = async (req, res) => {
                 updates.normalizedPhone = normPhone;
             }
 
-            if (status !== undefined && existing.status !== status) {
+            if (status !== undefined && leadExists.status !== status) {
                 activityEntries.push({
                     type: 'status_change',
-                    description: `Status changed from '${existing.status}' to '${status}'`,
+                    description: `Status changed from '${leadExists.status}' to '${status}'`,
                     fieldName: 'status',
-                    oldValue: existing.status,
+                    oldValue: leadExists.status,
                     newValue: status
                 });
                 updates.status = status;
             }
 
-            if (priority !== undefined && existing.priority !== priority) {
+            if (priority !== undefined && leadExists.priority !== priority) {
                 activityEntries.push({
                     type: 'priority_change',
-                    description: `Priority changed from '${existing.priority}' to '${priority}'`,
+                    description: `Priority changed from '${leadExists.priority}' to '${priority}'`,
                     fieldName: 'priority',
-                    oldValue: existing.priority,
+                    oldValue: leadExists.priority,
                     newValue: priority
                 });
                 updates.priority = priority;
             }
 
-            if (owner !== undefined && existing.owner !== owner) {
+            if (isPrivileged && owner !== undefined && leadExists.owner !== owner) {
                 activityEntries.push({
                     type: 'owner_change',
-                    description: `Lead owner reassigned from '${existing.owner}' to '${owner}'`,
+                    description: `Lead owner reassigned from '${leadExists.owner}' to '${owner}'`,
                     fieldName: 'owner',
-                    oldValue: existing.owner,
+                    oldValue: leadExists.owner,
                     newValue: owner
                 });
                 updates.owner = owner;
@@ -940,7 +1085,7 @@ const updateLeadHandler = async (req, res) => {
             if (serviceInterested !== undefined) updates.serviceInterested = serviceInterested;
             if (budget !== undefined) updates.budget = budget;
             if (notes !== undefined) updates.notes = notes;
-            if (assignedToId !== undefined) updates.assignedToId = assignedToId;
+            if (isPrivileged && assignedToId !== undefined) updates.assignedToId = assignedToId;
 
             // 1. Update lead in DB
             await tx.lead.update({
@@ -948,38 +1093,44 @@ const updateLeadHandler = async (req, res) => {
                 data: updates
             });
 
-            // 2. Insert any activity logs inside transaction
-            for (const act of activityEntries) {
-                await tx.activityLog.create({
-                    data: {
+            // 2. Insert any activity logs inside transaction (batched in single query)
+            if (activityEntries.length > 0) {
+                await tx.activityLog.createMany({
+                    data: activityEntries.map((act) => ({
                         leadId: req.params.id,
                         type: act.type,
                         description: act.description,
                         fieldName: act.fieldName,
                         oldValue: String(act.oldValue ?? ''),
                         newValue: String(act.newValue ?? ''),
-                        performedByName: 'Agent'
-                    }
+                        performedByName: req.user?.name || 'Agent',
+                        performedById: req.user?.userId || null
+                    }))
                 });
             }
 
-            return await tx.lead.findUnique({
+            const updated = await tx.lead.findUnique({
                 where: { id: req.params.id },
                 include: {
                     followUps: { orderBy: { dueDate: 'asc' } },
                     activityLogs: { orderBy: { timestamp: 'desc' } }
                 }
             });
+
+            return { status: 200, lead: updated };
         });
 
-        if (!updatedLead) {
-            return res.status(404).json({ success: false, message: 'Lead not found' });
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
         }
 
         res.status(200).json({
             success: true,
             message: 'Lead updated successfully',
-            lead: formatLead(updatedLead)
+            lead: formatLead(result.lead)
         });
     } catch (err) {
         console.error('Error updating lead:', err.message);
@@ -995,6 +1146,21 @@ router.put('/lead/:id', updateLeadHandler);
 // -------------------------------------------------------------
 router.post('/:id/tasks', async (req, res) => {
     try {
+        const userScope = getUserScopeFilter(req);
+        const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
+        if (!lead) {
+            return res.status(404).json({ success: false, message: `Lead with ID ${req.params.id} does not exist.` });
+        }
+
+        if (userScope) {
+            const accessible = await prisma.lead.findFirst({
+                where: { id: req.params.id, ...userScope }
+            });
+            if (!accessible) {
+                return res.status(403).json({ success: false, message: 'Access denied: you do not have permission to add tasks to this lead' });
+            }
+        }
+
         const { title, type, dueDate, notes, priority, assignedTo } = req.body;
 
         if (!title || !title.trim()) {
@@ -1004,16 +1170,9 @@ router.post('/:id/tasks', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Task due date is required' });
         }
 
-        // Verify lead exists (Foreign key referential integrity)
-        const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
-        if (!lead) {
-            return res.status(404).json({
-                success: false,
-                message: `Foreign Key Constraint Violation: Referenced lead with ID ${req.params.id} does not exist.`
-            });
-        }
+        const result = await withTransaction(async (tx) => {
+            const leadExists = lead;
 
-        const task = await withTransaction(async (tx) => {
             const newTask = await tx.followUp.create({
                 data: {
                     leadId: req.params.id,
@@ -1023,7 +1182,9 @@ router.post('/:id/tasks', async (req, res) => {
                     notes: notes ? String(notes).trim() : '',
                     priority: priority || 'Medium',
                     isCompleted: false,
-                    assignedToName: assignedTo || lead.owner || 'Unassigned'
+                    assignedToName: assignedTo || leadExists.owner || 'Unassigned',
+                    assignedToId: leadExists.assignedToId || null,
+                    createdById: req.user?.userId || null
                 }
             });
 
@@ -1033,17 +1194,25 @@ router.post('/:id/tasks', async (req, res) => {
                     leadId: req.params.id,
                     type: 'task_added',
                     description: `Follow-up task scheduled: "${newTask.title}" (Due: ${new Date(newTask.dueDate).toLocaleDateString()})`,
-                    performedByName: assignedTo || 'Agent'
+                    performedByName: req.user?.name || assignedTo || 'Agent',
+                    performedById: req.user?.userId || null
                 }
             });
 
-            return newTask;
+            return { status: 201, task: newTask };
         });
+
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
+        }
 
         res.status(201).json({
             success: true,
             message: 'Follow-up task scheduled',
-            task: formatTask(task)
+            task: formatTask(result.task)
         });
     } catch (err) {
         console.error('Error adding follow-up task:', err.message);
@@ -1057,14 +1226,29 @@ router.post('/:id/tasks', async (req, res) => {
 router.patch('/:id/tasks/:taskId', async (req, res) => {
     try {
         const { isCompleted, title, type, dueDate, notes, priority, assignedTo } = req.body;
+        const userScope = getUserScopeFilter(req);
 
-        const updated = await withTransaction(async (tx) => {
+        const result = await withTransaction(async (tx) => {
+            const leadExists = await tx.lead.findUnique({ where: { id: req.params.id } });
+            if (!leadExists) {
+                return { status: 404, message: 'Lead not found' };
+            }
+
+            if (userScope) {
+                const accessible = await tx.lead.findFirst({
+                    where: { id: req.params.id, ...userScope }
+                });
+                if (!accessible) {
+                    return { status: 403, message: 'Access denied: you do not have permission to modify tasks on this lead' };
+                }
+            }
+
             const existingTask = await tx.followUp.findUnique({
                 where: { id: req.params.taskId }
             });
 
             if (!existingTask || existingTask.leadId !== req.params.id) {
-                return null;
+                return { status: 404, message: 'Task not found on this lead' };
             }
 
             const data = {};
@@ -1091,7 +1275,8 @@ router.patch('/:id/tasks/:taskId', async (req, res) => {
                         leadId: req.params.id,
                         type: 'task_completed',
                         description: `Task "${task.title}" marked as ${task.isCompleted ? 'Completed' : 'Pending'}`,
-                        performedByName: 'Agent'
+                        performedByName: req.user?.name || 'Agent',
+                        performedById: req.user?.userId || null
                     }
                 });
             } else {
@@ -1100,25 +1285,117 @@ router.patch('/:id/tasks/:taskId', async (req, res) => {
                         leadId: req.params.id,
                         type: 'task_updated',
                         description: `Task "${task.title}" updated`,
-                        performedByName: 'Agent'
+                        performedByName: req.user?.name || 'Agent',
+                        performedById: req.user?.userId || null
                     }
                 });
             }
 
-            return task;
+            return { status: 200, task };
         });
 
-        if (!updated) {
-            return res.status(404).json({ success: false, message: 'Task not found on this lead' });
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
         }
 
         res.status(200).json({
             success: true,
             message: 'Task updated successfully',
-            task: formatTask(updated)
+            task: formatTask(result.task)
         });
     } catch (err) {
         console.error('Error updating task:', err.message);
+        res.status(500).json({ success: false, message: 'Internal server error', error: err.message });
+    }
+});
+
+// -------------------------------------------------------------
+// PATCH /api/leads/tasks/:taskId (Direct toggle/update task by taskId)
+// -------------------------------------------------------------
+router.patch('/tasks/:taskId', async (req, res) => {
+    try {
+        const { isCompleted, title, type, dueDate, notes, priority, assignedTo } = req.body;
+        const userScope = getUserScopeFilter(req);
+
+        const result = await withTransaction(async (tx) => {
+            const existingTask = await tx.followUp.findUnique({
+                where: { id: req.params.taskId }
+            });
+
+            if (!existingTask) {
+                return { status: 404, message: 'Task not found' };
+            }
+
+            // Verify parent lead is accessible to this user
+            if (userScope) {
+                const accessibleLead = await tx.lead.findFirst({
+                    where: { id: existingTask.leadId, ...userScope }
+                });
+                if (!accessibleLead) {
+                    return { status: 403, message: 'Access denied: you do not have permission to modify this task' };
+                }
+            }
+
+            const data = {};
+            if (isCompleted !== undefined) {
+                data.isCompleted = Boolean(isCompleted);
+                data.completedAt = Boolean(isCompleted) ? new Date() : null;
+            }
+            if (title !== undefined) data.title = String(title).trim();
+            if (type !== undefined) data.type = type;
+            if (dueDate !== undefined) data.dueDate = new Date(dueDate);
+            if (notes !== undefined) data.notes = notes;
+            if (priority !== undefined) data.priority = priority;
+            if (assignedTo !== undefined) data.assignedToName = assignedTo;
+
+            const task = await tx.followUp.update({
+                where: { id: req.params.taskId },
+                data
+            });
+
+            // Activity log on the lead
+            if (isCompleted !== undefined && isCompleted !== existingTask.isCompleted) {
+                await tx.activityLog.create({
+                    data: {
+                        leadId: existingTask.leadId,
+                        type: 'task_completed',
+                        description: `Task "${task.title}" marked as ${task.isCompleted ? 'Completed' : 'Pending'}`,
+                        performedByName: req.user?.name || 'Agent',
+                        performedById: req.user?.userId || null
+                    }
+                });
+            } else {
+                await tx.activityLog.create({
+                    data: {
+                        leadId: existingTask.leadId,
+                        type: 'task_updated',
+                        description: `Task "${task.title}" updated`,
+                        performedByName: req.user?.name || 'Agent',
+                        performedById: req.user?.userId || null
+                    }
+                });
+            }
+
+            return { status: 200, task };
+        });
+
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Task updated successfully',
+            task: formatTask(result.task)
+        });
+    } catch (err) {
+        console.error('Error updating task directly:', err.message);
         res.status(500).json({ success: false, message: 'Internal server error', error: err.message });
     }
 });
@@ -1128,13 +1405,28 @@ router.patch('/:id/tasks/:taskId', async (req, res) => {
 // -------------------------------------------------------------
 router.delete('/:id/tasks/:taskId', async (req, res) => {
     try {
-        const deleted = await withTransaction(async (tx) => {
+        const userScope = getUserScopeFilter(req);
+        const result = await withTransaction(async (tx) => {
+            const leadExists = await tx.lead.findUnique({ where: { id: req.params.id } });
+            if (!leadExists) {
+                return { status: 404, message: 'Lead not found' };
+            }
+
+            if (userScope) {
+                const accessible = await tx.lead.findFirst({
+                    where: { id: req.params.id, ...userScope }
+                });
+                if (!accessible) {
+                    return { status: 403, message: 'Access denied: you do not have permission to delete tasks on this lead' };
+                }
+            }
+
             const task = await tx.followUp.findUnique({
                 where: { id: req.params.taskId }
             });
 
             if (!task || task.leadId !== req.params.id) {
-                return null;
+                return { status: 404, message: 'Task not found on this lead' };
             }
 
             await tx.followUp.delete({
@@ -1146,15 +1438,19 @@ router.delete('/:id/tasks/:taskId', async (req, res) => {
                     leadId: req.params.id,
                     type: 'task_deleted',
                     description: `Task "${task.title}" was deleted`,
-                    performedByName: 'Agent'
+                    performedByName: req.user?.name || 'Agent',
+                    performedById: req.user?.userId || null
                 }
             });
 
-            return task;
+            return { status: 200, task };
         });
 
-        if (!deleted) {
-            return res.status(404).json({ success: false, message: 'Task not found' });
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
         }
 
         res.status(200).json({
@@ -1172,15 +1468,26 @@ router.delete('/:id/tasks/:taskId', async (req, res) => {
 // -------------------------------------------------------------
 router.post('/:id/activities', async (req, res) => {
     try {
-        const { type, description, performedBy } = req.body;
-
-        if (!description || !description.trim()) {
-            return res.status(400).json({ success: false, message: 'Activity description is required' });
-        }
-
+        const userScope = getUserScopeFilter(req);
         const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
         if (!lead) {
             return res.status(404).json({ success: false, message: 'Lead not found' });
+        }
+
+        if (userScope) {
+            const accessible = await prisma.lead.findFirst({
+                where: { id: req.params.id, ...userScope }
+            });
+            if (!accessible) {
+                return res.status(403).json({ success: false, message: 'Access denied: you do not have permission to record activities on this lead' });
+            }
+        }
+
+        const { type, performedBy } = req.body;
+        const description = req.body.description || req.body.action || req.body.notes;
+
+        if (!description || !String(description).trim()) {
+            return res.status(400).json({ success: false, message: 'Activity description is required' });
         }
 
         const activity = await prisma.activityLog.create({
@@ -1188,7 +1495,8 @@ router.post('/:id/activities', async (req, res) => {
                 leadId: req.params.id,
                 type: type || 'note_added',
                 description: String(description).trim(),
-                performedByName: performedBy || 'Agent',
+                performedByName: req.user?.name || performedBy || 'Agent',
+                performedById: req.user?.userId || null,
                 timestamp: new Date()
             }
         });
@@ -1209,9 +1517,19 @@ router.post('/:id/activities', async (req, res) => {
 // -------------------------------------------------------------
 router.patch('/:id/archive', async (req, res) => {
     try {
-        const lead = await withTransaction(async (tx) => {
+        const userScope = getUserScopeFilter(req);
+        const result = await withTransaction(async (tx) => {
             const existing = await tx.lead.findUnique({ where: { id: req.params.id } });
-            if (!existing) return null;
+            if (!existing) return { status: 404, message: 'Lead not found' };
+
+            if (userScope) {
+                const accessible = await tx.lead.findFirst({
+                    where: { id: req.params.id, ...userScope }
+                });
+                if (!accessible) {
+                    return { status: 403, message: 'Access denied: you do not have permission to archive this lead' };
+                }
+            }
 
             const updated = await tx.lead.update({
                 where: { id: req.params.id },
@@ -1226,24 +1544,30 @@ router.patch('/:id/archive', async (req, res) => {
                     leadId: req.params.id,
                     type: 'archived',
                     description: 'Lead was archived',
-                    performedByName: 'Agent'
+                    performedByName: req.user?.name || 'Agent',
+                    performedById: req.user?.userId || null
                 }
             });
 
-            return await tx.lead.findUnique({
+            const fullLead = await tx.lead.findUnique({
                 where: { id: req.params.id },
                 include: { followUps: true, activityLogs: true }
             });
+
+            return { status: 200, lead: fullLead };
         });
 
-        if (!lead) {
-            return res.status(404).json({ success: false, message: 'Lead not found' });
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
         }
 
         res.status(200).json({
             success: true,
             message: 'Lead archived successfully',
-            lead: formatLead(lead)
+            lead: formatLead(result.lead)
         });
     } catch (err) {
         console.error('Error archiving lead:', err.message);
@@ -1256,9 +1580,19 @@ router.patch('/:id/archive', async (req, res) => {
 // -------------------------------------------------------------
 router.patch('/:id/unarchive', async (req, res) => {
     try {
-        const lead = await withTransaction(async (tx) => {
+        const userScope = getUserScopeFilter(req);
+        const result = await withTransaction(async (tx) => {
             const existing = await tx.lead.findUnique({ where: { id: req.params.id } });
-            if (!existing) return null;
+            if (!existing) return { status: 404, message: 'Lead not found' };
+
+            if (userScope) {
+                const accessible = await tx.lead.findFirst({
+                    where: { id: req.params.id, ...userScope }
+                });
+                if (!accessible) {
+                    return { status: 403, message: 'Access denied: you do not have permission to restore this lead' };
+                }
+            }
 
             const updated = await tx.lead.update({
                 where: { id: req.params.id },
@@ -1273,24 +1607,30 @@ router.patch('/:id/unarchive', async (req, res) => {
                     leadId: req.params.id,
                     type: 'restored',
                     description: 'Lead was restored from archive',
-                    performedByName: 'Agent'
+                    performedByName: req.user?.name || 'Agent',
+                    performedById: req.user?.userId || null
                 }
             });
 
-            return await tx.lead.findUnique({
+            const fullLead = await tx.lead.findUnique({
                 where: { id: req.params.id },
                 include: { followUps: true, activityLogs: true }
             });
+
+            return { status: 200, lead: fullLead };
         });
 
-        if (!lead) {
-            return res.status(404).json({ success: false, message: 'Lead not found' });
+        if (result.status === 403) {
+            return res.status(403).json({ success: false, message: result.message });
+        }
+        if (result.status === 404) {
+            return res.status(404).json({ success: false, message: result.message });
         }
 
         res.status(200).json({
             success: true,
             message: 'Lead restored successfully',
-            lead: formatLead(lead)
+            lead: formatLead(result.lead)
         });
     } catch (err) {
         console.error('Error unarchiving lead:', err.message);
@@ -1303,6 +1643,14 @@ router.patch('/:id/unarchive', async (req, res) => {
 // -------------------------------------------------------------
 const deleteLeadHandler = async (req, res) => {
     try {
+        const isPrivileged = req.user && isGlobalRole(req.user.role);
+        if (!isPrivileged) {
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied: only administrators and managers can permanently delete leads'
+            });
+        }
+
         const deleted = await withTransaction(async (tx) => {
             const lead = await tx.lead.findUnique({ where: { id: req.params.id } });
             if (!lead) return null;
@@ -1338,6 +1686,21 @@ router.delete('/lead/:id', deleteLeadHandler);
 // -------------------------------------------------------------
 router.get('/:id/follow-ups', async (req, res) => {
     try {
+        const userScope = getUserScopeFilter(req);
+        const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
+        if (!lead) {
+            return res.status(404).json({ success: false, message: 'Lead not found' });
+        }
+
+        if (userScope) {
+            const accessible = await prisma.lead.findFirst({
+                where: { id: req.params.id, ...userScope }
+            });
+            if (!accessible) {
+                return res.status(403).json({ success: false, message: 'Access denied: you do not have permission to view records on this lead' });
+            }
+        }
+
         const followUps = await prisma.followUp.findMany({
             where: { leadId: req.params.id },
             orderBy: { dueDate: 'asc' }
@@ -1359,6 +1722,21 @@ router.get('/:id/follow-ups', async (req, res) => {
 // -------------------------------------------------------------
 router.get('/:id/activity-logs', async (req, res) => {
     try {
+        const userScope = getUserScopeFilter(req);
+        const lead = await prisma.lead.findUnique({ where: { id: req.params.id } });
+        if (!lead) {
+            return res.status(404).json({ success: false, message: 'Lead not found' });
+        }
+
+        if (userScope) {
+            const accessible = await prisma.lead.findFirst({
+                where: { id: req.params.id, ...userScope }
+            });
+            if (!accessible) {
+                return res.status(403).json({ success: false, message: 'Access denied: you do not have permission to view records on this lead' });
+            }
+        }
+
         const logs = await prisma.activityLog.findMany({
             where: { leadId: req.params.id },
             orderBy: { timestamp: 'desc' }
